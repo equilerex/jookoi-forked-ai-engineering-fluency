@@ -14,6 +14,18 @@ pnpm start
 # Open http://localhost:3333
 ```
 
+## Screenshots
+
+<p align="center">
+  <img src="docs/images/recent-sessions-addons.jpg" alt="Recent Sessions Table and Navigation" width="100%">
+</p>
+<p align="center"><em>Recent Sessions overview with Antigravity session discovery, HydraFusion badges, and left-truncated folder path subtitles.</em></p>
+
+<p align="center">
+  <img src="docs/images/session-improements.jpg" alt="Enhanced Session Log Inspector and Telemetry" width="100%">
+</p>
+<p align="center"><em>Session inspector featuring rendered Markdown, structured tool argument cards, model metrics, execution tokens, and raw MD toggles.</em></p>
+
 ## Key Improvements & Additions in This Fork
 
 ### 1. Standalone Browser SPA Shell

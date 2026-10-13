@@ -134,16 +134,14 @@ function copyStaticAssets(distDir, webviewDir) {
     }
   }
 
-  const allPresent = WEBVIEW_BUNDLES.every((b) => fs.existsSync(path.join(webviewDir, b)));
-  if (!allPresent) {
-    ensureWebviewBundles(extWebviewDir);
-    for (const bundle of WEBVIEW_BUNDLES) {
-      fs.copyFileSync(path.join(extWebviewDir, bundle), path.join(webviewDir, bundle));
+  ensureWebviewBundles(extWebviewDir);
+  for (const bundle of WEBVIEW_BUNDLES) {
+    const srcBundle = path.join(extWebviewDir, bundle);
+    if (fs.existsSync(srcBundle)) {
+      fs.copyFileSync(srcBundle, path.join(webviewDir, bundle));
     }
-    console.log(`Copied ${WEBVIEW_BUNDLES.length} webview bundles`);
-  } else {
-    console.log(`Webview bundles already present (${WEBVIEW_BUNDLES.length})`);
   }
+  console.log(`Synchronized ${WEBVIEW_BUNDLES.length} webview bundles`);
 
   let codiconsSrcDir = path.join(__dirname, '..', 'vscode-extension', 'node_modules', '@vscode', 'codicons', 'dist');
   if (!fs.existsSync(codiconsSrcDir)) {

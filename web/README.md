@@ -2,6 +2,18 @@
 
 A standalone local web application that surfaces the full AI Engineering Fluency dashboards in any modern browser without requiring VS Code or Electron.
 
+## Previews
+
+<p align="center">
+  <img src="docs/recent-sessions-addons.jpg" alt="Recent Sessions Table and Navigation" width="100%">
+</p>
+<p align="center"><em>Recent Sessions overview with Antigravity session discovery, HydraFusion badges, and left-truncated folder path subtitles.</em></p>
+
+<p align="center">
+  <img src="docs/session-improements.jpg" alt="Enhanced Session Log Inspector and Telemetry" width="100%">
+</p>
+<p align="center"><em>Session inspector featuring rendered Markdown, structured tool argument cards, model metrics, execution tokens, and raw MD toggles.</em></p>
+
 ## Core Capabilities & Features
 
 ### 1. Browser-Native Multi-View Experience

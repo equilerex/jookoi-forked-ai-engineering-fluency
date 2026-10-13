@@ -664,6 +664,46 @@ html, body {
     font-size: 12px;
     border: 1px solid var(--vscode-panel-border);
 }
+
+/* Recent Sessions table subtitle & badges */
+.sessions-table td.session-col-title {
+    max-width: 340px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.session-title-link {
+    color: var(--link-color, #4fc1ff);
+    text-decoration: none;
+    cursor: pointer;
+}
+.session-title-link:hover {
+    text-decoration: underline;
+}
+.hydrafusion-session-badge {
+    display: inline-block;
+    margin-right: 4px;
+    padding: 1px 5px;
+    border: 1px solid var(--vscode-badge-background, var(--accent-color));
+    border-radius: 999px;
+    background: var(--vscode-badge-background, var(--accent-color));
+    color: var(--vscode-badge-foreground, var(--bg-primary));
+    font-size: 10px;
+    font-weight: 600;
+    line-height: 14px;
+    vertical-align: middle;
+}
+.session-subtitle {
+    font-size: 11px;
+    color: var(--text-secondary, #8b949e);
+    margin-top: 2px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    max-width: 340px;
+    direction: rtl;
+    text-align: left;
+}
 `;
 
 // Embedded View Styles (Clean padding between outer header and inner view header + active buttons)
@@ -961,7 +1001,7 @@ body .container,
 }
 .session-subtitle {
     font-size: 11px;
-    color: var(--text-secondary, var(--vscode-descriptionForeground, #8b949e));
+    color: var(--text-secondary, #8b949e);
     margin-top: 2px;
     overflow: hidden;
     text-overflow: ellipsis;
