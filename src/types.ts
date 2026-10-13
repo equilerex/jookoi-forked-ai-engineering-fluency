@@ -916,6 +916,8 @@ export interface TodaySessionSummary {
   activeDurationMs?: number;
   /** Workspace/repository name the session belongs to. Absent when attribution is unavailable. */
   workspace?: string;
+  /** Full directory/repository path where the session was executed. Absent when attribution is unavailable. */
+  workspacePath?: string;
   /** Number of sub-agent/delegation tool calls detected in this session (see `SessionFileCache.subAgentCalls`). Absent when zero. */
   subAgentCalls?: number;
 }

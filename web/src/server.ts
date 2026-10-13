@@ -10,6 +10,7 @@ import {
     getMaturityData,
     getFluencyData,
     getDiagnosticsData,
+    analyzeModelUsageData,
     refreshStats,
     getAllRecentSessionsList,
 } from './statsService';
@@ -25,6 +26,7 @@ export {
     getMaturityData,
     getFluencyData,
     getDiagnosticsData,
+    analyzeModelUsageData,
     refreshStats,
     getSessionFiles,
     getAllRecentSessionsList,
@@ -179,6 +181,33 @@ export function createServer(): http.Server {
             return;
         }
 
+        if (pathname === '/api/analyze-model-usage' && req.method === 'GET') {
+            try {
+                const editor = url.searchParams.get('editor') || 'all';
+                const timeRange = url.searchParams.get('timeRange') || 'all';
+                const result = await analyzeModelUsageData(editor, timeRange);
+                res.writeHead(200, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify(result));
+            } catch (err: any) {
+                res.writeHead(500, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ error: err.message }));
+            }
+            return;
+        }
+
+        if (pathname === '/api/analyze-ttft' && req.method === 'GET') {
+            const granularity = url.searchParams.get('granularity') || 'day';
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({
+                command: 'ttftResult',
+                granularity,
+                buckets: [],
+                series: [],
+                sampleCount: 0,
+                fileCount: 0,
+            }));
+            return;
+        }
         // HTML Pages
         try {
             const isEmbed = url.searchParams.get('embed') === '1';

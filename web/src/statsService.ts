@@ -26,6 +26,7 @@ import type {
     TodaySessionSummary,
 } from '../../src/types';
 import { createEmptyContextRefs, calculateEstimatedCost } from '../../src/tokenEstimation';
+import { addModelUsage } from '../../src/statsHelpers';
 import { toLocalDayKey } from '../../src/utils/dayKeys';
 import { calculateMaturityScores, getFluencyLevelData } from '../../src/maturityScoring';
 import { getToolFamilies } from '../../vscode-extension/src/toolFamilies';
@@ -41,6 +42,7 @@ import {
 } from '../../cli/src/sessionProcessing';
 import { analyzeSessionUsage, mergeUsageAnalysis } from '../../src/usageAnalysis';
 import { buildRecentSessionBuckets, type RecentSessionBucketItem } from '../../src/recentSessions';
+import { parseWorkspaceStorageJsonFile } from '../../src/workspacePathResolver';
 import toolNamesData from '../../src/toolNames.json';
 
 const toolNameMap = ((toolNamesData as any).toolNameMap || toolNamesData) as Record<string, string>;
@@ -55,6 +57,7 @@ interface UsageCacheEntry {
     analysis: SessionUsageAnalysis;
     title?: string;
     workspace?: string;
+    workspacePath?: string;
 }
 
 const USAGE_CACHE_DIR = path.join(os.homedir(), '.copilot-token-tracker');
@@ -142,13 +145,27 @@ export function sessionEditorName(file: string): string {
     return detectEditorSource(file) || 'Unknown';
 }
 
-export function extractSessionTitleAndWorkspace(filePath: string, content?: string): { title: string; workspace: string } {
+export function extractSessionTitleAndWorkspace(filePath: string, content?: string): { title: string; workspace: string; workspacePath?: string } {
     let title: string | null = null;
     let workspace: string | null = null;
+    let workspacePath: string | null = null;
 
-    // Fast heuristic from path for workspace/repository
+    // Fast heuristic for VS Code workspaceStorage
+    const normFile = filePath.replace(/\\/g, '/');
+    const wsHashMatch = normFile.match(/^(.*\/workspaceStorage\/[^/]+)/i);
+    if (wsHashMatch) {
+        const wsDir = wsHashMatch[1];
+        const wsJson = path.join(wsDir, 'workspace.json');
+        const folder = parseWorkspaceStorageJsonFile(wsJson, ['folder', 'configuration']);
+        if (folder) {
+            workspacePath = folder;
+            workspace = path.basename(folder, '.code-workspace');
+        }
+    }
+
+    // Fast heuristic from path for workspace/repository (e.g. Claude Code)
     const claudeMatch = filePath.match(/[\\/]\.claude[\\/]projects[\\/]([^\\/]+)/);
-    if (claudeMatch) {
+    if (claudeMatch && !workspace) {
         const folder = claudeMatch[1];
         const repoIdx = folder.toLowerCase().indexOf('repos-');
         if (repoIdx >= 0) {
@@ -168,6 +185,7 @@ export function extractSessionTitleAndWorkspace(filePath: string, content?: stri
             return {
                 title: workspace ? `${workspace} session` : path.basename(filePath, path.extname(filePath)),
                 workspace: workspace || 'Workspace',
+                workspacePath: workspacePath || (workspace && workspace !== 'Workspace' ? workspace : undefined),
             };
         }
     }
@@ -175,7 +193,7 @@ export function extractSessionTitleAndWorkspace(filePath: string, content?: stri
     const lines = content.split('\n');
     let firstUserText: string | null = null;
 
-    for (let i = 0; i < Math.min(120, lines.length); i++) {
+    for (let i = 0; i < Math.min(150, lines.length); i++) {
         const l = lines[i].trim();
         if (!l) { continue; }
         try {
@@ -192,13 +210,42 @@ export function extractSessionTitleAndWorkspace(filePath: string, content?: stri
                 }
             }
 
-            // 2. Workspace from cwd or git
-            if (!workspace) {
+            // 2. Workspace and WorkspacePath from cwd, tool calls, or content
+            if (!workspacePath) {
+                let candidatePath: string | null = null;
                 if (typeof obj.cwd === 'string' && obj.cwd.trim()) {
-                    workspace = path.basename(obj.cwd.replace(/\\/g, '/').replace(/\/$/, ''));
+                    candidatePath = obj.cwd.trim();
                 } else if (typeof obj.payload?.cwd === 'string' && obj.payload.cwd.trim()) {
-                    workspace = path.basename(obj.payload.cwd.replace(/\\/g, '/').replace(/\/$/, ''));
-                } else if (obj.git?.repository_url || obj.payload?.git?.repository_url) {
+                    candidatePath = obj.payload.cwd.trim();
+                } else if (typeof obj.workspaceRoot === 'string' && obj.workspaceRoot.trim()) {
+                    candidatePath = obj.workspaceRoot.trim();
+                } else if (typeof obj.rootPath === 'string' && obj.rootPath.trim()) {
+                    candidatePath = obj.rootPath.trim();
+                } else if (Array.isArray(obj.tool_calls)) {
+                    for (const tc of obj.tool_calls) {
+                        const cwd = tc.args?.Cwd || tc.args?.cwd;
+                        if (typeof cwd === 'string' && cwd.trim()) {
+                            candidatePath = cwd.trim();
+                            break;
+                        }
+                    }
+                } else if (typeof obj.content === 'string') {
+                    const wsMatch = obj.content.match(/Active Workspaces?:\s*\r?\n\s*-\s*([^\r\n]+)/i);
+                    const cwdMatch = obj.content.match(/Command Working Directory:\s*([^\r\n]+)/i);
+                    if (wsMatch) {
+                        candidatePath = wsMatch[1].trim();
+                    } else if (cwdMatch) {
+                        candidatePath = cwdMatch[1].trim();
+                    }
+                }
+
+                if (candidatePath) {
+                    const clean = candidatePath.replace(/^"+|"+$/g, '').replace(/\/$/, '').replace(/\\$/, '');
+                    if (clean && !clean.includes('\n')) {
+                        workspacePath = clean;
+                        workspace = path.basename(clean.replace(/\\/g, '/'));
+                    }
+                } else if (!workspace && (obj.git?.repository_url || obj.payload?.git?.repository_url)) {
                     const repoUrl = String(obj.git?.repository_url || obj.payload?.git?.repository_url);
                     workspace = path.basename(repoUrl, '.git');
                 }
@@ -207,7 +254,10 @@ export function extractSessionTitleAndWorkspace(filePath: string, content?: stri
             // 3. User message
             if (!firstUserText) {
                 let msg = '';
-                if (obj.type === 'user' && obj.message?.content) {
+                if (obj.type === 'USER_INPUT' && typeof obj.content === 'string') {
+                    const userReqMatch = obj.content.match(/<USER_REQUEST>([\s\S]*?)<\/USER_REQUEST>/);
+                    msg = userReqMatch ? userReqMatch[1].trim() : obj.content.trim();
+                } else if (obj.type === 'user' && obj.message?.content) {
                     msg = typeof obj.message.content === 'string' ? obj.message.content : JSON.stringify(obj.message.content);
                 } else if (obj.type === 'user.message' && obj.data?.content) {
                     msg = obj.data.content;
@@ -224,7 +274,7 @@ export function extractSessionTitleAndWorkspace(filePath: string, content?: stri
 
                 if (msg) {
                     // Clean XML wrappers
-                    msg = msg.replace(/<(?:environment_context|system_reminder|pasted_content)[^>]*>[\s\S]*?<\/(?:environment_context|system_reminder|pasted_content)>/gi, '');
+                    msg = msg.replace(/<(?:environment_context|system_reminder|pasted_content|USER_REQUEST|ADDITIONAL_METADATA|user_information)[^>]*>[\s\S]*?<\/(?:environment_context|system_reminder|pasted_content|USER_REQUEST|ADDITIONAL_METADATA|user_information)>/gi, '');
                     msg = msg.replace(/<[^>]+>/g, '').trim();
                     if (msg.length > 5) {
                         firstUserText = msg.split('\n')[0].slice(0, 65).trim();
@@ -241,12 +291,16 @@ export function extractSessionTitleAndWorkspace(filePath: string, content?: stri
             workspace = reposMatch[1];
         } else {
             const parentDir = path.basename(path.dirname(filePath));
-            if (parentDir && !parentDir.startsWith('.') && parentDir !== 'sessions' && parentDir !== 'projects') {
+            if (parentDir && !parentDir.startsWith('.') && parentDir !== 'sessions' && parentDir !== 'projects' && parentDir !== 'logs') {
                 workspace = parentDir;
             } else {
                 workspace = 'Workspace';
             }
         }
+    }
+
+    if (!workspacePath && workspace && workspace !== 'Workspace') {
+        workspacePath = workspace;
     }
 
     if (!title) {
@@ -256,13 +310,20 @@ export function extractSessionTitleAndWorkspace(filePath: string, content?: stri
     return {
         title: title || `${workspace} session`,
         workspace: workspace || 'Workspace',
+        workspacePath: workspacePath || undefined,
     };
 }
 
-async function getSessionUsageAnalysisCached(file: string, mtimeMs: number, size: number): Promise<{ analysis: SessionUsageAnalysis; title: string; workspace: string }> {
+async function getSessionUsageAnalysisCached(file: string, mtimeMs: number, size: number): Promise<{ analysis: SessionUsageAnalysis; title: string; workspace: string; workspacePath?: string }> {
     const cached = usageCache.get(file);
     if (cached && cached.mtime === mtimeMs && cached.size === size && cached.title && cached.workspace) {
-        return { analysis: cached.analysis, title: cached.title, workspace: cached.workspace };
+        if (cached.workspacePath) {
+            return { analysis: cached.analysis, title: cached.title, workspace: cached.workspace, workspacePath: cached.workspacePath };
+        }
+        const { workspacePath } = extractSessionTitleAndWorkspace(file);
+        cached.workspacePath = workspacePath || cached.workspace;
+        usageCacheDirty = true;
+        return { analysis: cached.analysis, title: cached.title, workspace: cached.workspace, workspacePath: cached.workspacePath };
     }
     const deps = {
         warn: () => { /* quiet */ },
@@ -272,10 +333,10 @@ async function getSessionUsageAnalysisCached(file: string, mtimeMs: number, size
         ecosystems: getEcosystems(),
     };
     const analysis = await analyzeSessionUsage(deps, file);
-    const { title, workspace } = extractSessionTitleAndWorkspace(file);
-    usageCache.set(file, { mtime: mtimeMs, size, analysis, title, workspace });
+    const { title, workspace, workspacePath } = extractSessionTitleAndWorkspace(file);
+    usageCache.set(file, { mtime: mtimeMs, size, analysis, title, workspace, workspacePath });
     usageCacheDirty = true;
-    return { analysis, title, workspace };
+    return { analysis, title, workspace, workspacePath };
 }
 
 export async function calculateUsageAnalysisStatsFast(sessionFiles: string[]): Promise<UsageAnalysisStats> {
@@ -309,9 +370,9 @@ export async function calculateUsageAnalysisStatsFast(sessionFiles: string[]): P
     // Concurrently process the relevant files using both cliCache and usageCache
     const analyzedResults = await runWithConcurrency(relevant, async ({ file, stats }) => {
         try {
-            const { analysis, title, workspace } = await getSessionUsageAnalysisCached(file, stats.mtimeMs, stats.size);
+            const { analysis, title, workspace, workspacePath } = await getSessionUsageAnalysisCached(file, stats.mtimeMs, stats.size);
             const data = stats.mtime >= last30DaysStart ? await processSessionFile(file) : undefined;
-            return { file, stats, analysis, data, title, workspace };
+            return { file, stats, analysis, data, title, workspace, workspacePath };
         } catch {
             return null;
         }
@@ -319,7 +380,7 @@ export async function calculateUsageAnalysisStatsFast(sessionFiles: string[]): P
 
     for (const res of analyzedResults) {
         if (!res) { continue; }
-        const { file, stats, analysis, data, title, workspace } = res;
+        const { file, stats, analysis, data, title, workspace, workspacePath } = res;
         const modified = stats.mtime;
 
         if (modified < cutoffStart) { continue; }
@@ -335,6 +396,7 @@ export async function calculateUsageAnalysisStatsFast(sessionFiles: string[]): P
             sessionSummary = {
                 title,
                 workspace,
+                workspacePath,
                 filePath: file,
                 interactions: data.interactions,
                 toolCalls: analysis.toolCalls.total,
@@ -402,8 +464,10 @@ export async function calculateUsageAnalysisStatsFast(sessionFiles: string[]): P
 
 export async function getAllRecentSessionsList(): Promise<Array<{
     file: string;
+    filePath: string;
     title: string;
     workspace: string;
+    workspacePath?: string;
     editor: string;
     interactions: number;
     tokens: number;
@@ -418,8 +482,10 @@ export async function getAllRecentSessionsList(): Promise<Array<{
     }
     const list = Array.from(map.values()).map(s => ({
         file: s.filePath,
+        filePath: s.filePath,
         title: s.title || 'Session',
         workspace: s.workspace || 'Workspace',
+        workspacePath: s.workspacePath || s.workspace,
         editor: s.editor || 'Unknown',
         interactions: s.interactions || 0,
         tokens: s.totalTokens || 0,
@@ -532,21 +598,27 @@ export async function buildDetailedSessionFiles(sessionFiles: { file: string; si
     const rows = await runWithConcurrency(candidates, async (f) => {
         let meta: Awaited<ReturnType<typeof getSessionMeta>> = null;
         let data: { editorSource?: string; lastInteraction?: string } | null = null;
+        let sessionData: Awaited<ReturnType<typeof processSessionFile>> = null;
+        try {
+            sessionData = await processSessionFile(f.file);
+        } catch { /* parse failure */ }
         try {
             meta = await getSessionMeta(f.file);
             data = await getSessionLastActivity(f.file).then(d => d ? { lastInteraction: d.toISOString() } : null);
         } catch { /* parse failure */ }
-        const lastInteraction = meta?.lastInteraction ?? data?.lastInteraction ?? null;
+        const lastInteraction = meta?.lastInteraction ?? data?.lastInteraction ?? (sessionData?.lastModified ? sessionData.lastModified.toISOString() : null);
         return {
             file: f.file,
             title: meta?.title || null,
             size: f.size,
             modified: f.modified,
-            interactions: (meta as any)?.interactions ?? 0,
+            interactions: sessionData?.interactions ?? (meta as any)?.interactions ?? 0,
+            tokens: sessionData?.tokens,
+            modelUsage: sessionData?.modelUsage,
             contextReferences: createEmptyContextRefs(),
             firstInteraction: meta?.firstInteraction ?? null,
             lastInteraction,
-            editorSource: data?.editorSource || sessionEditorName(f.file),
+            editorSource: sessionData?.editorSource || data?.editorSource || sessionEditorName(f.file),
         };
     }, 16);
 
@@ -596,6 +668,102 @@ export function getDiagnosticsData(): Promise<any> {
         await computeAllDatasets(files);
         return cachedDiagnosticsData;
     });
+}
+
+export function getModelUsageTimeRangeBounds(range: string, now: Date = new Date()): { startMs: number; endMs: number } | null {
+    const startOfDay = (d: Date) => new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
+    const todayStart = startOfDay(now);
+    switch (range) {
+        case 'today':
+            return { startMs: todayStart, endMs: now.getTime() };
+        case 'yesterday': {
+            const yesterdayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1).getTime();
+            return { startMs: yesterdayStart, endMs: todayStart };
+        }
+        case 'week': {
+            const dayOfWeek = (now.getDay() + 6) % 7;
+            const weekStart = new Date(now.getFullYear(), now.getMonth(), now.getDate() - dayOfWeek).getTime();
+            return { startMs: weekStart, endMs: now.getTime() };
+        }
+        case 'month':
+            return { startMs: new Date(now.getFullYear(), now.getMonth(), 1).getTime(), endMs: now.getTime() };
+        case 'lastMonth':
+            return {
+                startMs: new Date(now.getFullYear(), now.getMonth() - 1, 1).getTime(),
+                endMs: new Date(now.getFullYear(), now.getMonth(), 1).getTime(),
+            };
+        default:
+            return null;
+    }
+}
+
+export async function analyzeModelUsageData(editor: string = 'all', timeRange: string = 'all') {
+    const diagData = await getDiagnosticsData();
+    const files = (diagData.detailedSessionFiles || []) as any[];
+
+    const editorMatching = editor === 'all'
+        ? files
+        : files.filter(f => (f.editorSource || 'Unknown') === editor);
+
+    const bounds = getModelUsageTimeRangeBounds(timeRange);
+    const matching = bounds
+        ? editorMatching.filter(f => {
+            const raw = f.lastInteraction || f.firstInteraction || f.modified;
+            if (!raw) { return false; }
+            const ts = Date.parse(raw);
+            return !isNaN(ts) && ts >= bounds.startMs && ts < bounds.endMs;
+        })
+        : editorMatching;
+
+    const aggregated: Record<string, any> = {};
+    const sessionCounts: Record<string, number> = {};
+    let filesWithUsage = 0;
+
+    for (const f of matching) {
+        if (!f.modelUsage || Object.keys(f.modelUsage).length === 0) { continue; }
+        filesWithUsage++;
+        for (const [model, usage] of Object.entries(f.modelUsage as Record<string, any>)) {
+            if (!aggregated[model]) {
+                aggregated[model] = {
+                    inputTokens: 0,
+                    outputTokens: 0,
+                    cachedReadTokens: 0,
+                    cacheCreationTokens: 0,
+                    cacheCreation1hTokens: 0,
+                    sessions: 0,
+                };
+            }
+            addModelUsage(aggregated, { [model]: { ...usage, sessions: 0 } });
+            sessionCounts[model] = (sessionCounts[model] || 0) + 1;
+        }
+    }
+
+    const rows = Object.entries(aggregated).map(([model, usage]) => ({
+        model,
+        sessionCount: sessionCounts[model] || 0,
+        inputTokens: usage.inputTokens,
+        outputTokens: usage.outputTokens,
+        cachedReadTokens: usage.cachedReadTokens || 0,
+        cacheCreationTokens: usage.cacheCreationTokens || 0,
+        cacheCreation1hTokens: usage.cacheCreation1hTokens || 0,
+        estimatedCost: calculateEstimatedCost({ [model]: usage }, modelPricing),
+    })).sort((a, b) => b.estimatedCost - a.estimatedCost);
+
+    const totalCost = calculateEstimatedCost(aggregated, modelPricing);
+    const supportsCache1h = Object.keys(aggregated).some(
+        model => (modelPricing as any)[model]?.cacheCreation1hCostPerMillion !== undefined
+    );
+
+    return {
+        command: 'modelUsageResult',
+        editor,
+        timeRange,
+        fileCount: matching.length,
+        filesWithUsage,
+        rows,
+        totalCost,
+        supportsCache1h,
+    };
 }
 
 export async function getMaturityData() {

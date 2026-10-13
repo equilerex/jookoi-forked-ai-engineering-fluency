@@ -131,18 +131,30 @@ return path.join(os.homedir(), '.gemini', 'antigravity');
  * The brain directory that contains per-session subdirectories.
  * %USERPROFILE%\.gemini\antigravity\brain
  */
+getAntigravityBrainDirs(): string[] {
+return [
+path.join(os.homedir(), '.gemini', 'antigravity', 'brain'),
+path.join(os.homedir(), '.gemini', 'antigravity-cli', 'brain'),
+path.join(os.homedir(), '.gemini', 'antigravity-ide', 'brain'),
+];
+}
+
+/**
+ * The brain directory that contains per-session subdirectories.
+ * %USERPROFILE%\.gemini\antigravity\brain
+ */
 getAntigravityBrainDir(): string {
 return path.join(this.getAntigravityDataDir(), 'brain');
 }
 
 /**
  * Returns true when the file path is an Antigravity transcript.
- * Path pattern: .../.gemini/antigravity/brain/{uuid}/.system_generated/logs/transcript.jsonl
+ * Path pattern: .../.gemini/antigravity[-cli|-ide]/brain/{uuid}/.system_generated/logs/transcript.jsonl
  */
 isAntigravitySessionFile(filePath: string): boolean {
 const normalized = normalizePathForComparison(filePath);
 return (
-normalized.includes('/.gemini/antigravity/brain/') &&
+/\/\.gemini\/antigravity(?:-cli|-ide)?\/brain\//.test(normalized) &&
 normalized.endsWith('/transcript.jsonl')
 );
 }
@@ -153,9 +165,9 @@ normalized.endsWith('/transcript.jsonl')
  */
 getSessionIdFromPath(filePath: string): string {
 const normalized = filePath.replace(/\\/g, '/');
-const brainIdx = normalized.toLowerCase().indexOf('/.gemini/antigravity/brain/');
-if (brainIdx === -1) { return path.basename(path.dirname(path.dirname(path.dirname(filePath)))); }
-const afterBrain = normalized.substring(brainIdx + '/.gemini/antigravity/brain/'.length);
+const match = normalized.toLowerCase().match(/\/\.gemini\/antigravity(?:-cli|-ide)?\/brain\//);
+if (!match || match.index === undefined) { return path.basename(path.dirname(path.dirname(path.dirname(filePath)))); }
+const afterBrain = normalized.substring(match.index + match[0].length);
 const slashIdx = afterBrain.indexOf('/');
 return slashIdx !== -1 ? afterBrain.substring(0, slashIdx) : afterBrain;
 }
@@ -164,13 +176,14 @@ return slashIdx !== -1 ? afterBrain.substring(0, slashIdx) : afterBrain;
  * Discover all Antigravity transcript files under the brain directory.
  */
 async getAntigravitySessionFiles(): Promise<string[]> {
-const brainDir = this.getAntigravityBrainDir();
+const brainDirs = this.getAntigravityBrainDirs();
 const sessionFiles: string[] = [];
+for (const brainDir of brainDirs) {
 let sessionDirs: fs.Dirent[];
 try {
 sessionDirs = await fs.promises.readdir(brainDir, { withFileTypes: true });
 } catch {
-return [];
+continue;
 }
 for (const sessionDir of sessionDirs) {
 if (!sessionDir.isDirectory()) { continue; }
@@ -188,6 +201,7 @@ sessionFiles.push(transcriptPath);
 }
 } catch {
 // transcript.jsonl does not exist for this session — skip.
+}
 }
 }
 return sessionFiles;
@@ -290,11 +304,13 @@ async getAntigravitySessionMeta(filePath: string): Promise<{
 title: string | undefined;
 firstInteraction: string | null;
 lastInteraction: string | null;
+workspacePath?: string;
 }> {
 const session = await this.readAntigravitySession(filePath);
 const all = session.allEntries;
 
 let title: string | undefined;
+let workspacePath: string | undefined;
 if (session.userEntries.length > 0) {
 const firstUser = session.userEntries[0];
 const content = firstUser.content ?? '';
@@ -303,10 +319,29 @@ const extracted = extractUserRequestText(content);
 title = extracted.length > 120 ? extracted.substring(0, 117) + '...' : extracted || undefined;
 }
 
+for (const entry of all) {
+if (!workspacePath && entry.content) {
+const wsMatch = entry.content.match(/Active Workspaces?:\s*\r?\n\s*-\s*([^\r\n]+)/i);
+if (wsMatch) {
+workspacePath = wsMatch[1].trim().replace(/^"+|"+$/g, '');
+}
+}
+if (!workspacePath && Array.isArray(entry.tool_calls)) {
+for (const tc of entry.tool_calls) {
+const cwd = (tc.args as any)?.Cwd || (tc.args as any)?.cwd;
+if (typeof cwd === 'string' && cwd.trim()) {
+workspacePath = cwd.trim().replace(/^"+|"+$/g, '');
+break;
+}
+}
+}
+if (workspacePath) { break; }
+}
+
 const firstInteraction = all.length > 0 ? (all[0].created_at ?? null) : null;
 const lastInteraction = all.length > 0 ? (all[all.length - 1].created_at ?? null) : null;
 
-return { title, firstInteraction, lastInteraction };
+return { title, firstInteraction, lastInteraction, workspacePath };
 }
 
 	/**

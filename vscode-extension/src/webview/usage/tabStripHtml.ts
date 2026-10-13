@@ -72,7 +72,7 @@ export function buildTabStripHtml(input: UsageTabStripInput): string {
 		`<button class="group-tab ${group.id === activeGroup ? 'active' : ''}" data-group="${group.id}" aria-pressed="${group.id === activeGroup}"><span class="codicon codicon-${group.icon}" aria-hidden="true"></span> ${escapeHtml(localize(group.labelKey))}</button>`
 	).join('\n\t\t\t\t');
 	const leafBars = USAGE_TAB_GROUPS.map(group =>
-		`<div class="tab-bar leaf-tabs" data-group="${group.id}"${group.id === activeGroup ? '' : ' style="display:none"'}>
+		`<div class="tab-bar leaf-tabs" data-group="${group.id}"${group.id === activeGroup ? '' : ' style="display: none;"'}>
 				${group.tabs.map(tab => buttons[tab]).join('\n\t\t\t\t')}
 			</div>`
 	).join('\n\t\t\t');

@@ -338,6 +338,17 @@ html, body {
     overflow: hidden;
     text-overflow: ellipsis;
 }
+.session-item-subtitle {
+    font-size: 11px;
+    color: var(--vscode-descriptionForeground, #858585);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    opacity: 0.9;
+}
 .session-item-meta {
     font-size: 11px;
     color: var(--vscode-descriptionForeground, #858585);
@@ -773,15 +784,16 @@ body .container,
 /* Level 3 Leaf navigation bar inside embedded panel */
 .leaf-tabs,
 .tabs.leaf-tabs {
-    display: flex !important;
+    display: flex;
     gap: 6px !important;
     padding: 4px 0 12px 0 !important;
     border-bottom: 1px solid var(--vscode-panel-border) !important;
     margin-bottom: 16px !important;
     flex-wrap: wrap !important;
 }
-.leaf-tabs[style*="display: none"],
-.tabs.leaf-tabs[style*="display: none"] {
+.leaf-tabs[style*="none"],
+.tabs.leaf-tabs[style*="none"],
+.tab-bar.leaf-tabs[style*="none"] {
     display: none !important;
 }
 .leaf-tabs .tab-button,
@@ -1173,7 +1185,8 @@ const SHELL_SCRIPT = `
             if (!q) return true;
             const t = (s.title || '').toLowerCase();
             const w = (s.workspace || '').toLowerCase();
-            return t.includes(q) || w.includes(q);
+            const wp = (s.workspacePath || '').toLowerCase();
+            return t.includes(q) || w.includes(q) || wp.includes(q);
         });
         if (filtered.length === 0) {
             sessionListEl.innerHTML = '<div class="session-dropdown-empty">No matching sessions found</div>';
@@ -1183,11 +1196,14 @@ const SHELL_SCRIPT = `
             const timeStr = s.lastActivity ? new Date(s.lastActivity).toLocaleDateString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : '';
             const title = s.title || (s.workspace ? s.workspace + ' session' : 'Untitled session');
             const ws = s.workspace || 'Workspace';
-            const fileParam = encodeURIComponent(s.filePath);
-            return '<a href="/session?file=' + fileParam + '" class="session-item" data-file="' + escapeHtmlText(s.filePath) + '" data-title="' + escapeHtmlText(title) + '" data-workspace="' + escapeHtmlText(ws) + '">' +
+            const wsPath = s.workspacePath || ws;
+            const filePath = s.filePath || s.file || '';
+            const fileParam = encodeURIComponent(filePath);
+            return '<a href="/session?file=' + fileParam + '" class="session-item" data-file="' + escapeHtmlText(filePath) + '" data-title="' + escapeHtmlText(title) + '" data-workspace="' + escapeHtmlText(ws) + '">' +
                 '<div class="session-item-title">' + escapeHtmlText(title) + '</div>' +
+                '<div class="session-item-subtitle" title="' + escapeHtmlText(wsPath) + '"><span class="codicon codicon-folder" style="font-size:11px; flex-shrink:0;"></span> <span>' + escapeHtmlText(wsPath) + '</span></div>' +
                 '<div class="session-item-meta">' +
-                    '<span class="session-item-workspace"><span class="codicon codicon-folder"></span> ' + escapeHtmlText(ws) + '</span>' +
+                    '<span class="session-item-workspace">' + escapeHtmlText(ws) + '</span>' +
                     '<span class="session-item-turns">' + (s.interactions || 0) + ' turns</span>' +
                     '<span class="session-item-time">' + timeStr + '</span>' +
                 '</div>' +
@@ -1645,8 +1661,45 @@ const EMBED_SHIM_SCRIPT = `
             }
         }
     }
+    // Ensure each row in the recent-sessions table shows the folder path subtitle
+    function ensureRecentSessionsSubtitles() {
+        const tableRoot = document.getElementById('data-table-root-recent-sessions');
+        if (!tableRoot) return;
+        const initial = window.__INITIAL_USAGE__;
+        if (!initial) return;
+        const allSessions = [
+            ...(initial.todaySessions || []),
+            ...(initial.recentSessions?.last30 || []),
+            ...(initial.recentSessions?.last7 || []),
+            ...(initial.recentSessions?.currentMonth || [])
+        ];
+        const fileMap = new Map();
+        for (const s of allSessions) {
+            if (s && s.filePath && !fileMap.has(s.filePath)) {
+                fileMap.set(s.filePath, s.workspacePath || s.workspace || '');
+            }
+        }
+        const titleCells = tableRoot.querySelectorAll('td.session-col-title');
+        titleCells.forEach(cell => {
+            if (cell.querySelector('.session-subtitle')) return;
+            const link = cell.querySelector('a.session-title-link');
+            if (!link) return;
+            const filePath = link.getAttribute('data-file');
+            const sub = fileMap.get(filePath);
+            if (sub) {
+                const subEl = document.createElement('div');
+                subEl.className = 'session-subtitle';
+                subEl.title = sub;
+                subEl.style.cssText = 'font-size:11px; color:var(--text-secondary, #8b949e); margin-top:2px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; max-width:340px;';
+                subEl.textContent = sub;
+                cell.appendChild(subEl);
+            }
+        });
+    }
+
     const sortObserver = new MutationObserver(() => {
         ensureSessionsTableSorted();
+        ensureRecentSessionsSubtitles();
         setupTopInfoTip();
     });
     sortObserver.observe(document.body, { childList: true, subtree: true });
@@ -1654,14 +1707,19 @@ const EMBED_SHIM_SCRIPT = `
     // Initial group, tab, and info tip restoration from window globals
     window.addEventListener('DOMContentLoaded', () => {
         setupTopInfoTip();
-        if (window.__INITIAL_GROUP__) {
-            const groupBtn = document.querySelector('.group-tab[data-group="' + window.__INITIAL_GROUP__ + '"]');
-            if (groupBtn) groupBtn.click();
+        function tryRestoreTabs() {
+            if (window.__INITIAL_GROUP__) {
+                const groupBtn = document.querySelector('.group-tab[data-group="' + window.__INITIAL_GROUP__ + '"]');
+                if (groupBtn && !groupBtn.classList.contains('active')) groupBtn.click();
+            }
+            if (window.__INITIAL_TAB__) {
+                const tabBtn = document.querySelector('.tab-button[data-tab="' + window.__INITIAL_TAB__ + '"], .tab[data-tab="' + window.__INITIAL_TAB__ + '"]');
+                if (tabBtn) tabBtn.click();
+            }
         }
-        if (window.__INITIAL_TAB__) {
-            const tabBtn = document.querySelector('.tab-button[data-tab="' + window.__INITIAL_TAB__ + '"], .tab[data-tab="' + window.__INITIAL_TAB__ + '"]');
-            if (tabBtn) tabBtn.click();
-        }
+        tryRestoreTabs();
+        setTimeout(tryRestoreTabs, 50);
+        setTimeout(tryRestoreTabs, 150);
     });
 
     // Tactile active / refreshing animation on refresh button clicks
@@ -1784,6 +1842,75 @@ const EMBED_SHIM_SCRIPT = `
                         break;
                     }
 
+                    case 'analyzeModelUsage': {
+                        const editor = msg.editor || 'all';
+                        const timeRange = msg.timeRange || 'all';
+                        fetch('/api/analyze-model-usage?editor=' + encodeURIComponent(editor) + '&timeRange=' + encodeURIComponent(timeRange))
+                            .then(r => {
+                                if (!r.ok) throw new Error('HTTP ' + r.status);
+                                return r.json();
+                            })
+                            .then(data => {
+                                window.postMessage(data, '*');
+                            })
+                            .catch(err => {
+                                console.error('Failed to analyze model usage:', err);
+                                window.postMessage({
+                                    command: 'modelUsageResult',
+                                    editor: editor,
+                                    timeRange: timeRange,
+                                    fileCount: 0,
+                                    filesWithUsage: 0,
+                                    rows: [],
+                                    totalCost: 0,
+                                    supportsCache1h: false,
+                                }, '*');
+                            });
+                        break;
+                    }
+
+                    case 'analyzeTtft': {
+                        const granularity = msg.granularity || 'day';
+                        const scanRange = msg.scanRange || '14d';
+                        fetch('/api/analyze-ttft?granularity=' + encodeURIComponent(granularity) + '&scanRange=' + encodeURIComponent(scanRange))
+                            .then(r => r.json())
+                            .then(data => {
+                                window.postMessage(data, '*');
+                            })
+                            .catch(() => {
+                                window.postMessage({
+                                    command: 'ttftResult',
+                                    granularity: granularity,
+                                    buckets: [],
+                                    series: [],
+                                    sampleCount: 0,
+                                    fileCount: 0,
+                                }, '*');
+                            });
+                        break;
+                    }
+
+                    case 'clearCache': {
+                        fetch('/api/refresh', { method: 'POST' })
+                            .then(() => {
+                                window.postMessage({ command: 'cacheCleared' }, '*');
+                            })
+                            .catch(() => {
+                                window.postMessage({ command: 'cacheCleared' }, '*');
+                            });
+                        break;
+                    }
+
+                    case 'openFormattedJsonlFile': {
+                        if (msg.file) {
+                            window.parent.postMessage({
+                                type: 'fluency-open-session',
+                                file: msg.file,
+                                url: '/session?file=' + encodeURIComponent(msg.file)
+                            }, '*');
+                        }
+                        break;
+                    }
                     case 'openRawFile':
                         if (window.__SESSION_FILE__) {
                             window.open('/session/raw?file=' + encodeURIComponent(window.__SESSION_FILE__), '_blank');
