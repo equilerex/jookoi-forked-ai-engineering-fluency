@@ -917,12 +917,12 @@ function buildNavHeader(activeTab: string, sessionTitle?: string, sessionUrl?: s
     const tabs = [
         { id: 'details', href: '/details', label: 'Details' },
         { id: 'usage', href: '/usage', label: 'Usage Analysis' },
-        { id: 'recent-sessions', href: '/recent-sessions', label: 'Recent Sessions' },
         { id: 'chart', href: '/chart', label: 'Token Chart' },
         { id: 'maturity', href: '/maturity', label: 'Fluency Score' },
         { id: 'fluency-level-viewer', href: '/fluency-level-viewer', label: 'Scoring Guide' },
         { id: 'environmental', href: '/environmental', label: 'Environmental' },
         { id: 'diagnostics', href: '/diagnostics', label: 'Diagnostics' },
+        { id: 'recent-sessions', href: '/recent-sessions', label: 'Recent Sessions' },
     ];
 
     const tabHtml = tabs.map(t => {
