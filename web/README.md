@@ -26,12 +26,16 @@ A standalone local web application that surfaces the full AI Engineering Fluency
   - Sub-agent delegation metrics (`📊 ↑in · ↓out tokens`, `💰 $cost`).
 - **Collapsible Raw JSON:** Original arguments and results remain accessible under collapsible details summaries (`🔍 View Raw JSON`, `📋 Result Output`).
 
-### 4. High-Performance Caching & Data Separation
+### 4. Multi-Ecosystem Session Discovery & Antigravity Support
+- **Multi-Brain Discovery:** Automatically scans `.gemini/antigravity/brain`, `.gemini/antigravity-cli/brain`, and `.gemini/antigravity-ide/brain` for session transcripts, ensuring sessions created in Antigravity CLI and IDE are fully attributed alongside VS Code, Cursor, and Claude Code.
+- **Workspace Directory Attribution:** Resolves and displays real local directory paths extracted from transcript `Active Workspaces:` entries and tool call working directories (`Cwd`).
+- **RTL Path Truncation:** Session path subtitles use `direction: rtl; text-align: left;` to truncate the root path on the left (e.g. `.../repos/Babylon-5/project`), ensuring the leaf project folder is always visible.
+- **Webview Iframe Event Bridges:** Message bridge intercepts `openFormattedJsonlFile` from embedded data tables to smoothly navigate the parent SPA shell to `/session?file=...`.
+
+### 5. High-Performance Caching & Telemetry APIs
 - **Shared In-Flight Promises:** Deduplicates simultaneous requests across pages sharing the same underlying session data.
 - **Background Dataset Refreshing:** Periodic cache refresh without blocking active web requests.
-- **Zero Upstream Conflicts:** Completely self-contained under `web/` with zero modifications to upstream repository sources.
-
----
+- **Telemetry Endpoints:** REST APIs for `/api/analyze-model-usage`, `/api/analyze-ttft`, `/api/recent-sessions`, `/api/sessions-list`, `/api/tool-call`, and `/api/refresh`.
 
 ## Getting Started
 

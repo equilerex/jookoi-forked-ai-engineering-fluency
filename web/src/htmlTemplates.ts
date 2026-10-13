@@ -341,13 +341,25 @@ html, body {
 .session-item-subtitle {
     font-size: 11px;
     color: var(--vscode-descriptionForeground, #858585);
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
     display: flex;
     align-items: center;
     gap: 4px;
     opacity: 0.9;
+}
+.session-item-subtitle .session-item-icon {
+    font-size: 11px;
+    flex-shrink: 0;
+}
+.session-item-subtitle .session-item-path {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    direction: rtl;
+    text-align: left;
+}
+.session-dropdown-chevron {
+    font-size: 10px;
+    margin-left: 2px;
 }
 .session-item-meta {
     font-size: 11px;
@@ -398,6 +410,9 @@ html, body {
     overflow-x: auto;
     white-space: nowrap;
     gap: 6px;
+}
+#app-sub-header.visible {
+    display: flex;
 }
 .sub-nav-container {
     display: flex;
@@ -915,6 +930,46 @@ body .container,
     display: inline-block;
     animation: spin-refresh-glyph 0.75s linear infinite;
 }
+
+/* Recent Sessions table subtitle & badges */
+.sessions-table td.session-col-title {
+    max-width: 340px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.session-title-link {
+    color: var(--link-color, #4fc1ff);
+    text-decoration: none;
+    cursor: pointer;
+}
+.session-title-link:hover {
+    text-decoration: underline;
+}
+.hydrafusion-session-badge {
+    display: inline-block;
+    margin-right: 4px;
+    padding: 1px 5px;
+    border: 1px solid var(--vscode-badge-background, var(--accent-color));
+    border-radius: 999px;
+    background: var(--vscode-badge-background, var(--accent-color));
+    color: var(--vscode-badge-foreground, var(--bg-primary));
+    font-size: 10px;
+    font-weight: 600;
+    line-height: 14px;
+    vertical-align: middle;
+}
+.session-subtitle {
+    font-size: 11px;
+    color: var(--text-secondary, var(--vscode-descriptionForeground, #8b949e));
+    margin-top: 2px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    max-width: 340px;
+    direction: rtl;
+    text-align: left;
+}
 `;
 
 const JSON_CONFIG_SCRIPT = [
@@ -948,7 +1003,7 @@ function buildNavHeader(activeTab: string, sessionTitle?: string, sessionUrl?: s
         <button class="nav-tab session-tab ${activeTab === 'session' ? 'active' : ''}" id="btn-session-dropdown" type="button" title="${sessionTitle || 'Select a session'}">
             <span class="codicon codicon-history"></span>
             <span id="session-dropdown-label">${displaySessionTitle}</span>
-            <span class="codicon codicon-chevron-down" style="font-size:10px; margin-left:2px;"></span>
+            <span class="codicon codicon-chevron-down session-dropdown-chevron"></span>
         </button>
         <div class="session-dropdown-menu" id="session-dropdown-menu">
             <div class="session-dropdown-header">
@@ -1016,7 +1071,7 @@ function buildNavHeader(activeTab: string, sessionTitle?: string, sessionUrl?: s
             </button>
         </div>
     </header>
-    <nav id="app-sub-header" style="${showSubHeader ? 'display:flex;' : 'display:none;'}">
+    <nav id="app-sub-header" class="${showSubHeader ? 'visible' : ''}">
         <div class="sub-nav-container" id="sub-nav-links">
             ${subGroupTabsHtml}
         </div>
@@ -1201,7 +1256,7 @@ const SHELL_SCRIPT = `
             const fileParam = encodeURIComponent(filePath);
             return '<a href="/session?file=' + fileParam + '" class="session-item" data-file="' + escapeHtmlText(filePath) + '" data-title="' + escapeHtmlText(title) + '" data-workspace="' + escapeHtmlText(ws) + '">' +
                 '<div class="session-item-title">' + escapeHtmlText(title) + '</div>' +
-                '<div class="session-item-subtitle" title="' + escapeHtmlText(wsPath) + '"><span class="codicon codicon-folder" style="font-size:11px; flex-shrink:0;"></span> <span>' + escapeHtmlText(wsPath) + '</span></div>' +
+                '<div class="session-item-subtitle" title="' + escapeHtmlText(wsPath) + '"><span class="codicon codicon-folder session-item-icon"></span> <span class="session-item-path">' + escapeHtmlText(wsPath) + '</span></div>' +
                 '<div class="session-item-meta">' +
                     '<span class="session-item-workspace">' + escapeHtmlText(ws) + '</span>' +
                     '<span class="session-item-turns">' + (s.interactions || 0) + ' turns</span>' +
@@ -1327,12 +1382,12 @@ const SHELL_SCRIPT = `
         }
 
         if (!groups) {
-            subHeader.style.display = 'none';
+            subHeader.classList.remove('visible');
             subLinks.innerHTML = '';
             return;
         }
 
-        subHeader.style.display = 'flex';
+        subHeader.classList.add('visible');
         const cur = activeGroup || groups[0].id;
         subLinks.innerHTML = groups.map(g => {
             const cls = g.id === cur ? 'sub-nav-tab active' : 'sub-nav-tab';
@@ -1690,7 +1745,6 @@ const EMBED_SHIM_SCRIPT = `
                 const subEl = document.createElement('div');
                 subEl.className = 'session-subtitle';
                 subEl.title = sub;
-                subEl.style.cssText = 'font-size:11px; color:var(--text-secondary, #8b949e); margin-top:2px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; max-width:340px;';
                 subEl.textContent = sub;
                 cell.appendChild(subEl);
             }
