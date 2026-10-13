@@ -1,3 +1,50 @@
+# AI Engineering Fluency (Browser Web Fork)
+
+> **This repository is a fork of [rajbos/ai-engineering-fluency](https://github.com/rajbos/ai-engineering-fluency) introducing a browser-native standalone web application.**
+>
+> Run your entire token tracker, fluency scorecards, and session inspectors directly in your web browser at `http://localhost:3333` without opening a heavyweight editor (VS Code, Cursor) or relying on a desktop wrapper that lacks native browser search, zooming, URL bookmarks, and multi-tab workflows.
+
+## Quick Start (Web Dashboard)
+
+```bash
+cd web
+pnpm install
+pnpm run build
+pnpm start
+# Open http://localhost:3333
+```
+
+## Key Improvements & Additions in This Fork
+
+### 1. Standalone Browser SPA Shell
+- **Zero Full-Page Flashes**: A persistent application shell maintains top navigation, active tabs, and progress bars. View transitions swap isolated iframes without rebuilding the shell DOM.
+- **Bi-Directional Route Synchronization**: URLs update as you browse (`/?view=usage`, `/?tab=chart`, `/session?file=...`). Direct links and browser refreshes reload the active view.
+- **Multi-Tab Workflows**: Open multiple session logs simultaneously in separate browser tabs via middle-click or `Ctrl+Click` for side-by-side comparison.
+- **3-Layer Navigation Hierarchy**:
+  - Row 1: Primary modules (Details, Usage Analysis, Recent Sessions, Token Chart, Fluency Score, Scoring Guide, Environmental, Diagnostics, and a searchable session dropdown).
+  - Row 2: Contextual sub-headers for Usage and Diagnostics groups.
+  - Row 3: Inside-panel leaf pills.
+- **Interactive Width Resizer**: Drag handles and presets (`Original`, `70%`, `85%`, `100%`) let you fit wide tables to your monitor.
+
+### 2. Multi-Ecosystem Antigravity Support
+- **Multi-Brain Discovery**: Scans `.gemini/antigravity/brain`, `.gemini/antigravity-cli/brain`, and `.gemini/antigravity-ide/brain` for session transcripts. Fixes the defect where CLI sessions were omitted from reports.
+- **Directory Attribution**: Extracts real project working directories from transcript `Active Workspaces:` headers and tool call `Cwd` fields.
+- **RTL Left-Truncated Subtitles**: Long folder paths use `direction: rtl, text-align: left` so the root truncates on the left (`.../repos/Babylon-5/project`), keeping the leaf project folder visible.
+
+### 3. Rich Session Log Viewer
+- **Markdown and MDX Rendering**: Formats headings, blockquotes, lists, inline formatting, and fenced code blocks with language pills.
+- **View Toggles and Raw Copy**: Switch between rendered HTML (`👁️ Rendered`) and raw Markdown (`📝 Raw MD`) on any turn message, with one-click raw copy (`📋 Copy Raw`).
+- **Multiline Table Support**: Parses Markdown tables into styled HTML `<table>` elements wrapped in horizontal scrolling containers.
+- **Glanceable Tool Cards and Telemetry**: Replaces raw JSON blocks with structured vertical property cards. A top ribbon displays executing model name, input payload size, estimated tokens, output line counts, execution status tags, and sub-agent cost metrics.
+- **Hover Stabilization**: Suppresses upward bounce on turn cards for a steady reading experience.
+
+### 4. Code Quality & Integration Bridges
+- **Iframe Message Bridges**: Connects embedded webview events (`openFormattedJsonlFile`, `analyzeModelUsage`, `analyzeTtft`, `clearCache`) directly to parent shell navigation and backend REST endpoints.
+- **Semantic CSS Classes**: Clean class-based styling across web templates and webviews, eliminating inline style attributes.
+- **Fast Startup & Caching**: Pre-warms session indexes so subsequent route loads respond in under 5ms. Includes an automated integration test suite covering all 20 HTTP endpoints.
+
+---
+
 # AI Engineering Fluency
 
 (Previously known as the "GitHub Copilot Token Tracker")
