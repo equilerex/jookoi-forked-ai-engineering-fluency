@@ -118,7 +118,7 @@ export function getEditorSourceFromPath(filePath: string): string {
 	if (normalized.includes('/.claude/projects/')) { return detectClaudeCodeEditorVariant(filePath); }
 	if (normalized.includes('/.vibe/logs/session/')) { return 'Mistral Vibe'; }
 	// Antigravity must be checked before Gemini CLI: both live under ~/.gemini/.
-	if (normalized.includes('/.gemini/antigravity/brain/')) { return 'Antigravity'; }
+	if (/\/\.gemini\/antigravity(?:-cli|-ide)?\/brain\//.test(normalized)) { return 'Antigravity'; }
 	if (normalized.includes('/.gemini/tmp/') && normalized.includes('/chats/session-') && normalized.endsWith('.jsonl')) { return 'Gemini CLI'; }
 	if (normalized.includes('/cursor/')) { return 'Cursor'; }
 	if (normalized.includes('/code - insiders/')) { return 'VS Code Insiders'; }

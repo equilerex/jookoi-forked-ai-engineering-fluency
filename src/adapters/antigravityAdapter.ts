@@ -57,7 +57,14 @@ workspacePath?: string;
 return this.antigravity.getAntigravitySessionMeta(sessionFile);
 }
 
-getEditorRoot(_sessionFile: string): string {
+getEditorRoot(sessionFile: string): string {
+const brainDirs = this.antigravity.getAntigravityBrainDirs();
+const normalized = sessionFile.replace(/\\/g, '/').toLowerCase();
+for (const b of brainDirs) {
+if (normalized.includes(b.replace(/\\/g, '/').toLowerCase())) {
+return b;
+}
+}
 return this.antigravity.getAntigravityBrainDir();
 }
 
@@ -79,7 +86,7 @@ if (inspector.url()) {
 log(`🔍 [Antigravity] Found ${files.length} transcript(s)`);
 }
 if (files.length > 0) {
-log(`📄 Found ${files.length} session file(s) in Antigravity (~/.gemini/antigravity/brain/*/)`);
+log(`📄 Found ${files.length} session file(s) in Antigravity (~/.gemini/antigravity*/brain/*/)`);
 sessionFiles.push(...files);
 }
 } catch (error) {
@@ -90,12 +97,10 @@ return { sessionFiles, candidatePaths };
 }
 
 getCandidatePaths(): CandidatePath[] {
-return [
-{
-path: this.antigravity.getAntigravityBrainDir(),
+return this.antigravity.getAntigravityBrainDirs().map(p => ({
+path: p,
 source: 'Antigravity (brain/)',
-},
-];
+}));
 }
 
 async analyzeUsage(sessionFile: string, _ctx: UsageAnalysisAdapterContext): Promise<import('../types').SessionUsageAnalysis> {

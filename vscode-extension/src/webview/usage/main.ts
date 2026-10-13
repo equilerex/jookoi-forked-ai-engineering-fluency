@@ -1357,7 +1357,11 @@ function sessionTitleCellHtml(s: TodaySessionSummary): string {
 	const hydraFusionBadge = s.models.some(isHydraFusionModel)
 		? '<span class="hydrafusion-session-badge" title="This session used HydraFusion" style="display:inline-block; margin-right:4px; padding:1px 5px; border:1px solid var(--vscode-badge-background, var(--accent-color)); border-radius:999px; background:var(--vscode-badge-background, var(--accent-color)); color:var(--vscode-badge-foreground, var(--bg-primary)); font-size:10px; font-weight:600; line-height:14px; vertical-align:middle;">HydraFusion</span>'
 		: '';
-	return `<a href="#" class="session-title-link" data-file="${escapeHtml(s.filePath || '')}" title="Open viewer for session &quot;${title}&quot;" style="color:var(--link-color, #4fc1ff); text-decoration:none; cursor:pointer;">${hydraFusionBadge}${title}</a>`;
+	const pathSub = s.workspacePath || s.workspace;
+	const subtitleHtml = pathSub
+		? `<div class="session-subtitle" title="${escapeHtml(pathSub)}" style="font-size:11px; color:var(--text-secondary, #8b949e); margin-top:2px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; max-width:340px;">${escapeHtml(pathSub)}</div>`
+		: '';
+	return `<a href="#" class="session-title-link" data-file="${escapeHtml(s.filePath || '')}" title="Open viewer for session &quot;${title}&quot;" style="color:var(--link-color, #4fc1ff); text-decoration:none; cursor:pointer;">${hydraFusionBadge}${title}</a>${subtitleHtml}`;
 }
 
 /** Re-renders the sessions table after its rows changed (filters, lookback), back on its first page. */

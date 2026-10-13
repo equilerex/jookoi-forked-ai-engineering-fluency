@@ -1230,8 +1230,8 @@ function detectToolEditorFromPath(
 	if (lowerPath.includes('/.claude/projects/')) { return detectClaudeCodeEditorVariant(filePath); }
 	if (lowerPath.includes('/.vibe/logs/session/')) { return 'Mistral Vibe'; }
 	// Antigravity must be checked before Gemini CLI: both live under ~/.gemini/
-	// but Antigravity sessions are under ~/.gemini/antigravity/brain/ which is more specific.
-	if (lowerPath.includes('/.gemini/antigravity/brain/')) { return 'Antigravity'; }
+	// but Antigravity sessions are under ~/.gemini/antigravity[-cli|-ide]/brain/ which is more specific.
+	if (/\/\.gemini\/antigravity(?:-cli|-ide)?\/brain\//.test(lowerPath)) { return 'Antigravity'; }
 	if (isGeminiCliPath(lowerPath)) { return 'Gemini CLI'; }
 	return undefined;
 }
