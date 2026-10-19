@@ -132,6 +132,84 @@ function expireCachesOnDateChange(): void {
     cachedDataDay = today;
 }
 
+// ---------------------------------------------------------------------------
+// Memory-budgeted session loading
+//
+// The shared parsers read a whole session file into one string (logs reach 90MB).
+// Parsing a file is therefore scheduled by size: it is parsed once into the
+// shared caches under a byte budget (big files run alone), and the aggregate
+// calculators then run against warm caches instead of re-parsing every file.
+// Light files are published first so the page loads fast; heavy files follow in
+// the background.
+// ---------------------------------------------------------------------------
+
+const LIGHT_FILE_BYTES = 8 * 1024 * 1024;
+/** Estimated peak memory per parsed byte (string + line array + parsed objects). */
+const PARSE_MEMORY_FACTOR = 4;
+const PARSE_MEMORY_BUDGET_BYTES = 512 * 1024 * 1024;
+
+class ByteBudget {
+    private inUse = 0;
+    private waiters: Array<() => void> = [];
+
+    constructor(private readonly limit: number) { }
+
+    async run<T>(weight: number, fn: () => Promise<T>): Promise<T> {
+        const claimed = Math.min(weight, this.limit);
+        while (this.inUse > 0 && this.inUse + claimed > this.limit) {
+            await new Promise<void>((resolve) => this.waiters.push(resolve));
+        }
+        this.inUse += claimed;
+        try {
+            return await fn();
+        } finally {
+            this.inUse -= claimed;
+            this.waiters.splice(0).forEach((wake) => wake());
+        }
+    }
+}
+
+const parseBudget = new ByteBudget(PARSE_MEMORY_BUDGET_BYTES);
+
+async function statSessionSizes(files: string[]): Promise<Map<string, number>> {
+    const sizes = new Map<string, number>();
+    const results = await runWithConcurrency(files, async (file) => {
+        try {
+            return (await fs.promises.stat(getSessionBackingPath(file))).size;
+        } catch {
+            return 0;
+        }
+    }, 16);
+    files.forEach((file, index) => sizes.set(file, results[index] ?? 0));
+    return sizes;
+}
+
+function usageWindowCutoff(now: Date): Date {
+    const last30DaysStart = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 30);
+    const lastMonthStart = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+    return lastMonthStart < last30DaysStart ? lastMonthStart : last30DaysStart;
+}
+
+/** Parse each file once (smallest first) so later passes only hit the caches. */
+async function prewarmSessionCaches(files: string[], sizes: Map<string, number>): Promise<void> {
+    const cutoff = usageWindowCutoff(new Date());
+    const smallestFirst = [...files].sort((a, b) => (sizes.get(a) ?? 0) - (sizes.get(b) ?? 0));
+    await runWithConcurrency(smallestFirst, async (file) => {
+        const weight = (sizes.get(file) ?? 0) * PARSE_MEMORY_FACTOR;
+        await parseBudget.run(weight, async () => {
+            try {
+                await processSessionFile(file);
+                const stats = await statSessionFile(file);
+                if (stats.mtime >= cutoff || file.includes('.db')) {
+                    await getSessionUsageAnalysisCached(file, stats.mtimeMs, stats.size);
+                }
+            } catch { /* unparsable file: the calculators skip it too */ }
+            // Let HTTP requests through between files.
+            await new Promise<void>((resolve) => setImmediate(resolve));
+        });
+    }, 16);
+}
+
 export async function getSessionFiles(): Promise<string[]> {
     if (!cachedSessionFiles) {
         cachedSessionFiles = await discoverSessionFiles();
@@ -143,6 +221,26 @@ export function sessionEditorName(file: string): string {
     const editor = getEditorSourceFromPath(file);
     if (editor && editor !== 'Unknown') { return editor; }
     return detectEditorSource(file) || 'Unknown';
+}
+
+// Title/workspace come from the first ~150 lines; session logs can reach 100MB,
+// so read only the head instead of the whole file.
+const SESSION_HEAD_BYTES = 2 * 1024 * 1024;
+
+function readFileHead(filePath: string, maxBytes: number): string {
+    const fd = fs.openSync(filePath, 'r');
+    try {
+        const buffer = Buffer.alloc(maxBytes);
+        const bytesRead = fs.readSync(fd, buffer, 0, maxBytes, 0);
+        let text = buffer.toString('utf8', 0, bytesRead);
+        if (bytesRead === maxBytes) {
+            // Drop the possibly cut-off last line.
+            text = text.slice(0, Math.max(0, text.lastIndexOf('\n')));
+        }
+        return text;
+    } finally {
+        fs.closeSync(fd);
+    }
 }
 
 export function extractSessionTitleAndWorkspace(filePath: string, content?: string): { title: string; workspace: string; workspacePath?: string } {
@@ -180,7 +278,7 @@ export function extractSessionTitleAndWorkspace(filePath: string, content?: stri
     if (!content) {
         try {
             const backing = getSessionBackingPath(filePath);
-            content = fs.readFileSync(backing, 'utf8');
+            content = readFileHead(backing, SESSION_HEAD_BYTES);
         } catch {
             return {
                 title: workspace ? `${workspace} session` : path.basename(filePath, path.extname(filePath)),
@@ -345,7 +443,7 @@ export async function calculateUsageAnalysisStatsFast(sessionFiles: string[]): P
     const last30DaysStart = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 30);
     const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
     const lastMonthStart = new Date(now.getFullYear(), now.getMonth() - 1, 1);
-    const cutoffStart = lastMonthStart < last30DaysStart ? lastMonthStart : last30DaysStart;
+    const cutoffStart = usageWindowCutoff(now);
 
     // Concurrently stat all session files and filter to only relevant ones
     const fileStats = await runWithConcurrency(sessionFiles, async (file) => {
@@ -498,25 +596,60 @@ export async function getAllRecentSessionsList(): Promise<Array<{
 // Unified Concurrent Dataset Loading
 // ---------------------------------------------------------------------------
 
-async function computeAllDatasets(files: string[]): Promise<void> {
-    const startGeneration = dataGeneration;
+let cachesLoaded = false;
+async function ensureCachesLoaded(): Promise<void> {
+    // Load from disk once: reloading would discard entries parsed since the last save.
+    if (cachesLoaded) { return; }
+    cachesLoaded = true;
     await loadCache();
     loadWebUsageCache();
+}
 
-    const [stats, { labels, days, allDaysMap }, usageStats, diagData] = await Promise.all([
-        calculateDetailedStats(files),
-        calculateDailyStats(files),
-        calculateUsageAnalysisStatsFast(files),
-        buildDiagnosticsDataInternal(files),
-    ]);
+async function timed<T>(label: string, fn: () => Promise<T>): Promise<T> {
+    const startedAt = Date.now();
+    try {
+        return await fn();
+    } finally {
+        console.log(`[stats] ${label}: ${Date.now() - startedAt}ms`);
+    }
+}
 
-    if (startGeneration === dataGeneration) {
+/** Run the aggregate calculators one after another against warm caches and publish the result. */
+async function publishDatasets(files: string[], generation: number): Promise<void> {
+    const stats = await timed('detailed', () => calculateDetailedStats(files));
+    const { labels, days, allDaysMap } = await timed('daily', () => calculateDailyStats(files));
+    const usageStats = await timed('usage', () => calculateUsageAnalysisStatsFast(files));
+    const diagData = await timed('diagnostics', () => buildDiagnosticsDataInternal(files));
+
+    if (generation === dataGeneration) {
         cachedStats = stats;
         cachedChartPayload = buildChartPayload(labels, days, allDaysMap);
         cachedUsageStats = usageStats;
         cachedDiagnosticsData = diagData;
         cachedDataDay = toLocalDayKey(stats.lastUpdated);
     }
+    await saveCache();
+    saveWebUsageCache();
+}
+
+async function computeAllDatasets(files: string[]): Promise<void> {
+    const startGeneration = dataGeneration;
+    await ensureCachesLoaded();
+
+    const sizes = await statSessionSizes(files);
+    const heavyFiles = files.filter((f) => (sizes.get(f) ?? 0) > LIGHT_FILE_BYTES);
+    const lightFiles = files.filter((f) => (sizes.get(f) ?? 0) <= LIGHT_FILE_BYTES);
+
+    await timed(`prewarm ${lightFiles.length} light files`, () => prewarmSessionCaches(lightFiles, sizes));
+    await publishDatasets(lightFiles, startGeneration);
+
+    if (heavyFiles.length === 0) { return; }
+    // Heavy sessions finish in the background; the next request sees the complete datasets.
+    void shareInFlight('heavy-sessions', async () => {
+        await timed(`prewarm ${heavyFiles.length} heavy files`, () => prewarmSessionCaches(heavyFiles, sizes));
+        await publishDatasets(files, startGeneration);
+        console.log('[stats] heavy sessions included');
+    }).catch((err) => console.error('Heavy session processing failed:', err));
 }
 
 export function getStats(): Promise<DetailedStats> {
@@ -776,9 +909,8 @@ export function getFluencyData() {
 }
 
 export async function initStats(): Promise<void> {
-    await loadCache();
-    loadWebUsageCache();
-    // Warm all datasets in parallel at startup
+    await ensureCachesLoaded();
+    // Warm all datasets at startup
     const files = await getSessionFiles();
     await computeAllDatasets(files);
 }

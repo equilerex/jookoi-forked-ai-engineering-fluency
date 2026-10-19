@@ -1746,6 +1746,10 @@ const EMBED_SHIM_SCRIPT = `
         if (!tableRoot) return;
         const lastActiveTh = tableRoot.querySelector('th[data-column="lastActivity"]');
         if (!lastActiveTh) return;
+        // Sort once per table: a sort click re-renders the table, which re-fires the
+        // MutationObserver below, so an unguarded retry loops forever and freezes the page.
+        if (tableRoot.dataset.autoSorted === '1') return;
+        tableRoot.dataset.autoSorted = '1';
         if (lastActiveTh.getAttribute('aria-sort') !== 'descending') {
             const sortBtn = tableRoot.querySelector('[data-table-sort="lastActivity"]');
             if (sortBtn) {
@@ -1791,10 +1795,22 @@ const EMBED_SHIM_SCRIPT = `
         });
     }
 
+    // Batch mutations into one pass per frame and ignore the DOM changes made by the pass itself.
+    let enhancePending = false;
     const sortObserver = new MutationObserver(() => {
-        ensureSessionsTableSorted();
-        ensureRecentSessionsSubtitles();
-        setupTopInfoTip();
+        if (enhancePending) return;
+        enhancePending = true;
+        requestAnimationFrame(() => {
+            enhancePending = false;
+            sortObserver.disconnect();
+            try {
+                ensureSessionsTableSorted();
+                ensureRecentSessionsSubtitles();
+                setupTopInfoTip();
+            } finally {
+                sortObserver.observe(document.body, { childList: true, subtree: true });
+            }
+        });
     });
     sortObserver.observe(document.body, { childList: true, subtree: true });
 
