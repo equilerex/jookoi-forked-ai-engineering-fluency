@@ -4,6 +4,7 @@ import toolNamesData from '../../src/toolNames.json';
 import automaticToolsData from '../../src/automaticTools.json';
 import { getWebviewLocalization, getSystemLocale } from './statsService';
 import { LOGVIEWER_ENHANCER_STYLES, LOGVIEWER_ENHANCER_SCRIPT } from './logviewerEnhancer';
+import { PATH_LINK_MODE_STORAGE_KEY, PATH_LINK_STYLES, PATH_LINKIFIER_SCRIPT } from './pathLinks';
 
 const VSCODE_DARK_VARS = `
 :root {
@@ -1103,6 +1104,7 @@ function buildNavHeader(activeTab: string, sessionTitle?: string, sessionUrl?: s
                 <button class="width-btn" data-width="85%">85%</button>
                 <button class="width-btn" data-width="100%">100%</button>
             </div>
+            <button class="nav-btn" id="btn-path-open-mode" type="button"></button>
             <button class="nav-btn" id="btn-global-refresh" title="Refresh session data">
                 <span class="codicon codicon-refresh"></span> Refresh
             </button>
@@ -1179,6 +1181,24 @@ const SHELL_SCRIPT = `
         const next = current === 'dark' ? 'light' : current === 'light' ? 'auto' : 'dark';
         localStorage.setItem('fluency-theme', next);
         applyTheme(next);
+    });
+
+    // Path links in the page: clicking a file or folder path opens the file, or reveals it in its folder.
+    // Embedded pages read this same key on each click.
+    const pathOpenModeButton = document.getElementById('btn-path-open-mode');
+    function readPathOpenMode() {
+        try { return localStorage.getItem('${PATH_LINK_MODE_STORAGE_KEY}') === 'folder' ? 'folder' : 'file'; } catch (e) { return 'file'; }
+    }
+    function renderPathOpenMode(mode) {
+        if (!pathOpenModeButton) return;
+        pathOpenModeButton.textContent = mode === 'folder' ? 'Path links: reveal folder' : 'Path links: open file';
+        pathOpenModeButton.title = 'Click a file or folder path in the page to ' + (mode === 'folder' ? 'reveal it in its folder' : 'open it') + '. Click here to switch.';
+    }
+    renderPathOpenMode(readPathOpenMode());
+    pathOpenModeButton?.addEventListener('click', () => {
+        const next = readPathOpenMode() === 'folder' ? 'file' : 'folder';
+        try { localStorage.setItem('${PATH_LINK_MODE_STORAGE_KEY}', next); } catch (e) {}
+        renderPathOpenMode(next);
     });
 
     // -------------------------------------------------------------
@@ -1740,26 +1760,6 @@ const EMBED_SHIM_SCRIPT = `
         }
     }
 
-    // Automatically ensure recent-sessions table is sorted by Last Active desc
-    function ensureSessionsTableSorted() {
-        const tableRoot = document.getElementById('data-table-root-recent-sessions');
-        if (!tableRoot) return;
-        const lastActiveTh = tableRoot.querySelector('th[data-column="lastActivity"]');
-        if (!lastActiveTh) return;
-        // Sort once per table: a sort click re-renders the table, which re-fires the
-        // MutationObserver below, so an unguarded retry loops forever and freezes the page.
-        if (tableRoot.dataset.autoSorted === '1') return;
-        tableRoot.dataset.autoSorted = '1';
-        if (lastActiveTh.getAttribute('aria-sort') !== 'descending') {
-            const sortBtn = tableRoot.querySelector('[data-table-sort="lastActivity"]');
-            if (sortBtn) {
-                sortBtn.click();
-                if (lastActiveTh.getAttribute('aria-sort') === 'ascending') {
-                    sortBtn.click();
-                }
-            }
-        }
-    }
     // Ensure each row in the recent-sessions table shows the folder path subtitle
     function ensureRecentSessionsSubtitles() {
         const tableRoot = document.getElementById('data-table-root-recent-sessions');
@@ -1804,7 +1804,6 @@ const EMBED_SHIM_SCRIPT = `
             enhancePending = false;
             sortObserver.disconnect();
             try {
-                ensureSessionsTableSorted();
                 ensureRecentSessionsSubtitles();
                 setupTopInfoTip();
             } finally {
@@ -2085,6 +2084,7 @@ export function renderFullHtml(options: {
         ${VSCODE_LIGHT_VARS}
         ${VIEW_EMBED_STYLES}
         ${isSessionTab ? LOGVIEWER_ENHANCER_STYLES : ''}
+        ${PATH_LINK_STYLES}
     </style>
 </head>
 <body data-vscode-theme-kind="vscode-dark">
@@ -2099,6 +2099,7 @@ export function renderFullHtml(options: {
     </script>
     <script src="/static/${options.scriptFile}"></script>
     ${isSessionTab ? `<script>${LOGVIEWER_ENHANCER_SCRIPT}</script>` : ''}
+    <script>${PATH_LINKIFIER_SCRIPT}</script>
     ${options.afterBundleScript ? `<script>${options.afterBundleScript}</script>` : ''}
 </body>
 </html>`;

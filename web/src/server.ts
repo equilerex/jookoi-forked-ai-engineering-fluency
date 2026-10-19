@@ -1,7 +1,6 @@
 import * as http from 'http';
 import * as fs from 'fs';
 import * as path from 'path';
-import { spawn } from 'child_process';
 import {
     initStats,
     getStats,
@@ -17,6 +16,8 @@ import {
 import { getSessionLogData, getToolCallPrettyPayload } from './sessionLogService';
 import { renderFullHtml } from './htmlTemplates';
 import { getSessionBackingPath } from '../../cli/src/sessionProcessing';
+import { LocalPathError, LocalPathOpenMode, openLocalPath, parseOpenPathRequest } from './localPathOpener';
+import { parseResolvePathsRequest, resolveLocalPaths } from './localPathResolver';
 
 export {
     initStats,
@@ -80,25 +81,79 @@ function sendHtml(res: http.ServerResponse, html: string): void {
     res.end(html);
 }
 
-async function readRequestBody(req: http.IncomingMessage): Promise<string> {
+const MAX_OPEN_PATH_BODY_BYTES = 8 * 1024;
+const MAX_RESOLVE_PATHS_BODY_BYTES = 64 * 1024;
+
+async function handleResolvePathsRequest(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
+    try {
+        assertLocalJsonPost(req);
+        const body = await readRequestBody(req, MAX_RESOLVE_PATHS_BODY_BYTES);
+        const request = parseResolvePathsRequest(body);
+        const resolved = await resolveLocalPaths(request.paths, request.bases);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ resolved }));
+    } catch (err: any) {
+        const statusCode = err instanceof LocalPathError ? err.statusCode : 500;
+        if (statusCode === 500) { console.error(`Error resolving local paths:`, err); }
+        if (!res.headersSent) { res.writeHead(statusCode, { 'Content-Type': 'application/json' }); }
+        res.end(JSON.stringify({ error: err.message }));
+    }
+}
+
+async function readRequestBody(req: http.IncomingMessage, maxBytes = Infinity): Promise<string> {
     return new Promise((resolve, reject) => {
         let body = '';
-        req.on('data', chunk => { body += chunk; });
+        let receivedBytes = 0;
+        req.on('data', (chunk: Buffer) => {
+            receivedBytes += chunk.length;
+            if (receivedBytes > maxBytes) {
+                reject(new LocalPathError(413, 'Request body too large'));
+                req.destroy();
+                return;
+            }
+            body += chunk;
+        });
         req.on('end', () => resolve(body));
         req.on('error', reject);
     });
 }
 
-function revealInFileManager(filePath: string): void {
-    const target = getSessionBackingPath(filePath);
-    if (!fs.existsSync(target)) { return; }
+/** Refuses anything but a same-machine, same-origin JSON POST, so other pages cannot trigger an open. */
+function assertLocalJsonPost(req: http.IncomingMessage): void {
+    const remoteAddress = req.socket.remoteAddress ?? '';
+    const isLoopback = remoteAddress === '127.0.0.1' || remoteAddress === '::1' || remoteAddress === '::ffff:127.0.0.1';
+    if (!isLoopback) { throw new LocalPathError(403, 'Only requests from this machine are accepted'); }
 
-    if (process.platform === 'win32') {
-        spawn('explorer.exe', ['/select,', target], { detached: true });
-    } else if (process.platform === 'darwin') {
-        spawn('open', ['-R', target], { detached: true });
-    } else {
-        spawn('xdg-open', [path.dirname(target)], { detached: true });
+    const contentType = req.headers['content-type'] ?? '';
+    if (!contentType.toLowerCase().startsWith('application/json')) {
+        throw new LocalPathError(415, 'Content-Type must be application/json');
+    }
+
+    const fetchSite = req.headers['sec-fetch-site'];
+    if (fetchSite && fetchSite !== 'same-origin' && fetchSite !== 'none') {
+        throw new LocalPathError(403, 'Cross-site request refused');
+    }
+    if (req.headers.origin && req.headers.origin !== `http://${req.headers.host}`) {
+        throw new LocalPathError(403, 'Cross-origin request refused');
+    }
+}
+
+async function handleOpenPathRequest(req: http.IncomingMessage, res: http.ServerResponse, pathname: string): Promise<void> {
+    try {
+        assertLocalJsonPost(req);
+        const fallbackMode: LocalPathOpenMode = pathname === '/api/reveal' ? 'folder' : 'file';
+        const body = await readRequestBody(req, MAX_OPEN_PATH_BODY_BYTES);
+        const request = parseOpenPathRequest(body, fallbackMode);
+        // The reveal route also accepts session IDs, which map to their backing file first.
+        const targetPath = pathname === '/api/reveal' ? getSessionBackingPath(request.path) : request.path;
+        const result = openLocalPath({ ...request, path: targetPath });
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: true, ...result }));
+    } catch (err: any) {
+        const statusCode = err instanceof LocalPathError ? err.statusCode : 500;
+        if (statusCode === 500) { console.error(`Error opening local path:`, err); }
+        if (!res.headersSent) { res.writeHead(statusCode, { 'Content-Type': 'application/json' }); }
+        res.end(JSON.stringify({ error: err.message }));
     }
 }
 
@@ -126,17 +181,13 @@ export function createServer(): http.Server {
             return;
         }
 
-        if (pathname === '/api/reveal' && req.method === 'POST') {
-            try {
-                const body = await readRequestBody(req);
-                const { path: targetPath } = JSON.parse(body || '{}');
-                if (targetPath) { revealInFileManager(targetPath); }
-                res.writeHead(200, { 'Content-Type': 'application/json' });
-                res.end(JSON.stringify({ ok: true }));
-            } catch (err: any) {
-                res.writeHead(400, { 'Content-Type': 'application/json' });
-                res.end(JSON.stringify({ error: err.message }));
-            }
+        if ((pathname === '/api/open-path' || pathname === '/api/reveal') && req.method === 'POST') {
+            await handleOpenPathRequest(req, res, pathname);
+            return;
+        }
+
+        if (pathname === '/api/resolve-paths' && req.method === 'POST') {
+            await handleResolvePathsRequest(req, res);
             return;
         }
 
