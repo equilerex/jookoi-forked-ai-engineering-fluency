@@ -1014,6 +1014,37 @@ test('a preset-forced column survives the saved column settings restored by boot
 	assert.ok(headers.includes('Context'), `the Context column is visible; got ${headers.join(', ')}`);
 });
 
+test('Recent Sessions search matches title, workspace and path, and the table opens newest-first', async () => {
+	const stats = buildStats();
+	const baseSession = {
+		interactions: 10, toolCalls: 5, inputTokens: 1000, outputTokens: 500, thinkingTokens: 0,
+		cachedTokens: 0, totalTokens: 1500, estimatedCost: 0.5, editor: 'VS Code', models: ['gpt-5.6-terra'],
+	};
+	stats.todaySessions = [
+		{ ...baseSession, title: 'Fix login bug', filePath: 'a.jsonl', workspace: 'alpha', workspacePath: 'D:/work/alpha', lastActivity: '2026-09-05T11:00:00.000Z' },
+		{ ...baseSession, title: 'Refactor parser', filePath: 'b.jsonl', workspace: 'beta', workspacePath: 'D:/work/beta', lastActivity: '2026-09-06T11:00:00.000Z' },
+	];
+	const harness = await bootWebview(stats);
+	const doc = harness.window.document;
+	const titles = () => [...doc.querySelectorAll('.sessions-table tbody tr .session-title-link')].map((a: any) => a.textContent);
+	const search = doc.getElementById('sessions-search-input') as HTMLInputElement;
+	const typeQuery = (query: string) => {
+		search.value = query;
+		search.dispatchEvent(new harness.window.Event('input'));
+	};
+
+	assert.deepEqual(titles(), ['Refactor parser', 'Fix login bug'], 'the default sort is Last Active, newest first');
+
+	typeQuery('LOGIN');
+	assert.deepEqual(titles(), ['Fix login bug'], 'matching ignores case');
+
+	typeQuery('work/beta');
+	assert.deepEqual(titles(), ['Refactor parser'], 'the workspace path is searched too');
+
+	typeQuery('');
+	assert.equal(titles().length, 2, 'an empty query shows every session again');
+});
+
 test('renders cloud agent session results', async () => {
 	const harness = await bootWebview(buildStats());
 

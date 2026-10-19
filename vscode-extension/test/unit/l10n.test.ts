@@ -61,6 +61,7 @@ test('l10n: missing-instructions insight is tool-neutral in English and zh-cn', 
 test('l10n: paged curation table controls resolve in English and zh-cn', () => {
 	assert.equal(t('dataTable.previous'), 'Previous');
 	assert.equal(t('dataTable.next'), 'Next');
+	assert.equal(t('dataTable.loadMore'), 'Load more');
 	assert.equal(t('dataTable.page', 2, 3, 11, 20, 25), 'Page 2 of 3 · Showing 11–20 of 25');
 	assert.equal(t('dataTable.showing', 1, 10, 10), 'Showing 1–10 of 10');
 	assert.equal(t('dataTable.sortBy', 'Server'), 'Sort by Server');
@@ -72,6 +73,7 @@ test('l10n: paged curation table controls resolve in English and zh-cn', () => {
 	try {
 		assert.equal(t('dataTable.previous'), '上一页');
 		assert.equal(t('dataTable.next'), '下一页');
+		assert.equal(t('dataTable.loadMore'), '加载更多');
 		assert.equal(t('dataTable.page', 2, 3, 11, 20, 25), '第 2/3 页 · 显示 11–20 条，共 25 条');
 		assert.equal(t('dataTable.showing', 1, 10, 10), '显示 1–10 条，共 10 条');
 		assert.equal(t('dataTable.sortBy', 'Server'), '按Server排序');
