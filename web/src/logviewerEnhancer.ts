@@ -17,6 +17,30 @@ export const LOGVIEWER_ENHANCER_STYLES = `
     overflow-y: visible !important;
 }
 
+.tools-toggle-fab {
+    position: fixed;
+    left: 0;
+    bottom: 16px;
+    z-index: 1000;
+    padding: 6px 12px;
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text-primary);
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-subtle);
+    border-radius: 999px;
+    box-shadow: 0 2px 8px var(--shadow-color);
+    cursor: pointer;
+}
+
+.tools-toggle-fab:hover {
+    background: var(--bg-tertiary);
+}
+
+.tools-toggle-fab[hidden] {
+    display: none;
+}
+
 .pasted-content-banner {
     display: inline-flex;
     align-items: center;
@@ -397,12 +421,23 @@ export const LOGVIEWER_ENHANCER_STYLES = `
     border: 1px solid var(--vscode-widget-border);
     padding: 4px 8px;
     border-radius: 4px;
-    color: var(--vscode-terminal-ansiGreen, #23d18b);
+    color: #ffffff;
     display: block;
     white-space: pre-wrap;
     word-break: break-all;
     font-size: 11px;
     line-height: 1.45;
+}
+/* Light themes: white command text is unreadable on a light editor background. */
+:root[data-theme="light"] .tool-vcode,
+body[data-theme="light"] .tool-vcode,
+.vscode-light .tool-vcode {
+    color: #000000;
+}
+@media (prefers-color-scheme: light) {
+    :root:not([data-theme="dark"]) .tool-vcode {
+        color: #000000;
+    }
 }
 .tool-vcode-pattern {
     color: var(--vscode-charts-orange, #d18616);
@@ -466,6 +501,25 @@ export const LOGVIEWER_ENHANCER_STYLES = `
     background: rgba(34, 197, 94, 0.08);
     border: 1px solid rgba(34, 197, 94, 0.25);
     color: #86efac;
+}
+/* Light themes: the pastel diff text is unreadable on a light background. */
+:root[data-theme="light"] .tool-vdiff-pre-old,
+body[data-theme="light"] .tool-vdiff-pre-old,
+.vscode-light .tool-vdiff-pre-old {
+    color: #361b1e;
+}
+:root[data-theme="light"] .tool-vdiff-pre-new,
+body[data-theme="light"] .tool-vdiff-pre-new,
+.vscode-light .tool-vdiff-pre-new {
+    color: #000000;
+}
+@media (prefers-color-scheme: light) {
+    :root:not([data-theme="dark"]) .tool-vdiff-pre-old {
+        color: #361b1e;
+    }
+    :root:not([data-theme="dark"]) .tool-vdiff-pre-new {
+        color: #000000;
+    }
 }
 .tool-vcode-block {
     margin: 0;
@@ -932,9 +986,91 @@ export const LOGVIEWER_ENHANCER_SCRIPT = `
     }
 
     // -------------------------------------------------------------
+    // Fixed bottom-left toggle: expands or collapses every tool-calls section
+    // -------------------------------------------------------------
+    const TOOLS_TOGGLE_ID = 'jookoi-tools-toggle';
+
+    function getToolCallsSections() {
+        return document.querySelectorAll('details.tool-calls-details');
+    }
+
+    function updateToolsToggleLabel() {
+        const toggleButton = document.getElementById(TOOLS_TOGGLE_ID);
+        if (!toggleButton) return;
+        const sections = getToolCallsSections();
+        toggleButton.hidden = sections.length === 0;
+        const anyClosed = Array.from(sections).some(section => !section.open);
+        toggleButton.textContent = anyClosed ? '▸ Expand all tools' : '▾ Collapse all tools';
+        toggleButton.title = anyClosed ? 'Open every tool-calls section' : 'Close every tool-calls section';
+    }
+
+    function ensureToolsToggle() {
+        if (document.getElementById(TOOLS_TOGGLE_ID) || !document.body) return;
+        const toggleButton = document.createElement('button');
+        toggleButton.id = TOOLS_TOGGLE_ID;
+        toggleButton.type = 'button';
+        toggleButton.className = 'tools-toggle-fab';
+        toggleButton.addEventListener('click', () => {
+            const sections = getToolCallsSections();
+            const openAll = Array.from(sections).some(section => !section.open);
+            sections.forEach(section => { section.open = openAll; });
+            updateToolsToggleLabel();
+        });
+        // details "toggle" does not bubble, so listen in the capture phase to catch single-section clicks.
+        document.addEventListener('toggle', event => {
+            if (event.target && event.target.matches && event.target.matches('details.tool-calls-details')) {
+                updateToolsToggleLabel();
+            }
+        }, true);
+        document.body.appendChild(toggleButton);
+        updateToolsToggleLabel();
+    }
+
+    // -------------------------------------------------------------
+    // Step sides: hide the User or Assistant block when it has no text.
+    // The bundled renderer writes <em>No message</em> / <em>No response</em> placeholders.
+    // -------------------------------------------------------------
+    function isEmptyPlaceholderSide(messageEl) {
+        const textEl = messageEl.querySelector('.message-text');
+        if (!textEl) return true;
+        const onlyChild = textEl.children.length === 1 ? textEl.firstElementChild : null;
+        return !textEl.textContent.trim() || (onlyChild !== null && onlyChild.tagName === 'EM');
+    }
+
+    function hideEmptyStepSides() {
+        document.querySelectorAll('.turn-content').forEach(contentEl => {
+            const messageEls = contentEl.querySelectorAll(':scope > .message');
+            let visibleCount = 0;
+            messageEls.forEach(messageEl => {
+                const empty = isEmptyPlaceholderSide(messageEl);
+                messageEl.hidden = empty;
+                if (!empty) visibleCount++;
+            });
+            contentEl.hidden = visibleCount === 0;
+        });
+    }
+
+    // -------------------------------------------------------------
+    // Tool-calls sections start open. Opened once per section, so a section the user
+    // collapses stays collapsed when the list re-renders.
+    // -------------------------------------------------------------
+    function openToolSectionsOnce() {
+        getToolCallsSections().forEach(section => {
+            if (section.hasAttribute('data-jookoi-default-open')) return;
+            section.setAttribute('data-jookoi-default-open', 'true');
+            section.open = true;
+        });
+    }
+
+    // -------------------------------------------------------------
     // Main Enhancer Execution
     // -------------------------------------------------------------
     function enhanceLogViewer() {
+        ensureToolsToggle();
+        updateToolsToggleLabel();
+        hideEmptyStepSides();
+        openToolSectionsOnce();
+
         // 1. Enhance Turn Messages with Markdown & Raw Toggles
         const messageElements = document.querySelectorAll('.turn-content .message, .turn-card .message, .message.user-message, .message.assistant-message');
         messageElements.forEach(msgEl => {
