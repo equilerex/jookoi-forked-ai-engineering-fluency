@@ -30,7 +30,7 @@ import type { McpToolUsage, ModeUsage, ModelSwitchingAnalysis as BaseModelSwitch
 // CSS imported as text via esbuild
 import themeStyles from '../shared/theme.css';
 import dataTableStyles from '../shared/dataTable.css';
-import { renderDataTable, rerenderDataTable, setDataTableState, type DataTableColumn, type DataTableSortValue, type DataTableState } from '../shared/dataTable';
+import { renderDataTable, rerenderDataTable, setDataTableState, type DataTableColumn, type DataTableSortValue } from '../shared/dataTable';
 import styles from './styles.css';
 import { getWindowData } from '../../../../src/webview/shared/dataLoader';
 import { registerMessageHandler } from '../shared/messageHandler';
@@ -330,21 +330,10 @@ interface RepoAnalysisRecord {
 type UsageWebviewState = {
 	aboutCollapsed: boolean;
 	mcpPeriodView: McpPeriodView;
-	/** Recent Sessions table sort, kept across refreshes and tab switches. */
-	sessionsSort: { columnId: string; direction: 'asc' | 'desc' };
-	/** Recent Sessions period selector value. */
-	sessionsLookback: Period;
 };
 
-const DEFAULT_SESSIONS_SORT: UsageWebviewState['sessionsSort'] = { columnId: 'lastActivity', direction: 'desc' };
-
 const vscode = acquireVsCodeApi<UsageWebviewState>();
-const usageState = createViewStateManager<UsageWebviewState>(vscode, {
-	aboutCollapsed: false,
-	mcpPeriodView: 'server',
-	sessionsSort: DEFAULT_SESSIONS_SORT,
-	sessionsLookback: 'today',
-});
+const usageState = createViewStateManager<UsageWebviewState>(vscode, { aboutCollapsed: false, mcpPeriodView: 'server' });
 const restoredUsageState = usageState.restore();
 const notifyUsageWebviewReady = createUsageWebviewReadyNotifier(
 	(message) => vscode.postMessage(message),
@@ -1205,35 +1194,13 @@ let use24HourTime = true;
 let hideAutomaticToolCalls = true;
 // Lookback selector state: "today" renders the summaries bundled with updateStats;
 // longer windows are lazily requested from the extension host and cached here.
-let sessionsLookback: SessionsLookback = isSessionsLookback(restoredUsageState.sessionsLookback) ? restoredUsageState.sessionsLookback : 'today';
-/** Rows shown per "Load more" step of the Recent Sessions table. */
-const SESSIONS_PAGE_SIZE = 50;
-/** Load the next batch once the Load more button is this close to the bottom of the viewport. */
-const SESSIONS_LOAD_MORE_MARGIN_PX = 400;
+let sessionsLookback: SessionsLookback = 'today';
 let latestTodaySessions: TodaySessionSummary[] = [];
 const recentSessionsCache: { [period: string]: TodaySessionSummary[] } = {};
 /** Which optional columns are currently visible. Title (and the row number) are always shown. */
 let enabledSessionColumns: Set<SessionColumnId> = new Set(ALL_SESSION_COLUMN_IDS);
 /** Columns a navigation preset turned on; re-applied whenever saved settings replace the set above. */
 const presetForcedColumns = new Set<SessionColumnId>();
-/** Free-text search over the Recent Sessions rows. Matches title, workspace and workspace path, as the header search does. */
-let sessionSearchQuery = '';
-
-function isSessionsLookback(value: unknown): value is SessionsLookback {
-	return typeof value === 'string' && value !== 'allTime' && Object.prototype.hasOwnProperty.call(PERIOD_LABELS, value);
-}
-
-function isSessionsSort(value: unknown): value is UsageWebviewState['sessionsSort'] {
-	const sort = value as Partial<UsageWebviewState['sessionsSort']> | null | undefined;
-	if (!sort || (sort.direction !== 'asc' && sort.direction !== 'desc')) { return false; }
-	return sort.columnId === 'title' || ALL_SESSION_COLUMN_IDS.includes(sort.columnId as SessionColumnId);
-}
-
-// Restore the saved sort before the first render; the table applies it as its initial state.
-{
-	const restoredSessionsSort = isSessionsSort(restoredUsageState.sessionsSort) ? restoredUsageState.sessionsSort : DEFAULT_SESSIONS_SORT;
-	setDataTableState(SESSIONS_TABLE_ID, { sortColumn: restoredSessionsSort.columnId, sortDirection: restoredSessionsSort.direction });
-}
 
 // --- Recent Sessions pill filters (Editor / Model / Model vendor / HydraFusion) ---
 /** Active editor pill filters. Empty set means "no filter" (show all editors). */
@@ -1253,7 +1220,6 @@ function saveSessionColumnSettings(): void {
 
 /** Returns true when a session passes all currently active pill filters. */
 function sessionMatchesFilters(s: TodaySessionSummary): boolean {
-	if (!sessionMatchesSearchQuery(s)) { return false; }
 	if (sessionFilterNearContextLimitOnly && !isSessionNearContextLimit(s)) { return false; }
 	if (sessionFilterHydraFusionOnly && !s.models.some(isHydraFusionModel)) { return false; }
 	if (sessionFilterEditors.size > 0 && !sessionFilterEditors.has(s.editor || 'unknown')) { return false; }
@@ -1265,15 +1231,7 @@ function sessionMatchesFilters(s: TodaySessionSummary): boolean {
 /** Whether any Recent Sessions pill filter is currently active. */
 function hasActiveSessionFilters(): boolean {
 	return sessionFilterHydraFusionOnly || sessionFilterNearContextLimitOnly
-		|| sessionFilterEditors.size > 0 || sessionFilterVendors.size > 0 || sessionFilterModels.size > 0
-		|| sessionSearchQuery.trim() !== '';
-}
-
-/** Case-insensitive substring match on title, workspace and workspace path. */
-function sessionMatchesSearchQuery(s: TodaySessionSummary): boolean {
-	const query = sessionSearchQuery.trim().toLowerCase();
-	if (!query) { return true; }
-	return [s.title, s.workspace, s.workspacePath].some(field => (field || '').toLowerCase().includes(query));
+		|| sessionFilterEditors.size > 0 || sessionFilterVendors.size > 0 || sessionFilterModels.size > 0;
 }
 
 
@@ -1354,9 +1312,6 @@ function handleSessionFilterPillClick(target: HTMLElement): boolean {
 		sessionFilterModels.clear();
 		sessionFilterHydraFusionOnly = false;
 		sessionFilterNearContextLimitOnly = false;
-		sessionSearchQuery = '';
-		const searchInput = document.getElementById('sessions-search-input') as HTMLInputElement | null;
-		if (searchInput) { searchInput.value = ''; }
 		return true;
 	}
 	const pill = target.closest<HTMLElement>('.session-filter-pill');
@@ -1414,7 +1369,6 @@ function rerenderSessionsTableFromFirstPage(): void {
 	setDataTableState(SESSIONS_TABLE_ID, { page: 1 });
 	const container = document.getElementById('sessions-table-container');
 	if (container) { setHtml(container, buildSessionsTableHtml(cachedTodaySessions)); }
-	scheduleSessionsAutoLoad();
 }
 
 function renderTodaySessionsTable(sessions: TodaySessionSummary[]): string {
@@ -1443,40 +1397,10 @@ function buildSessionsTableHtml(sessions: TodaySessionSummary[]): string {
 			{ id: 'title', label: 'Title', className: 'session-col-title', sortValue: s => s.title || '', render: s => ({ html: sessionTitleCellHtml(s) }) },
 			...SESSION_COLUMN_DEFS.map(toSessionDataColumn),
 		],
-		initialSort: DEFAULT_SESSIONS_SORT,
-		pageSize: SESSIONS_PAGE_SIZE,
-		loadMore: true,
+		initialSort: { columnId: 'interactions', direction: 'desc' },
 		className: 'sessions-table',
-		onStateChange: persistSessionsSort,
-		onRender: scheduleSessionsAutoLoad,
 	});
 	return `${filterBarHtml}${table}`;
-}
-
-/** Saves the table's sort so a refresh or a return to the page keeps it. */
-function persistSessionsSort(state: Readonly<DataTableState>): void {
-	if (state.sortColumn === null) { return; }
-	usageState.patch({ sessionsSort: { columnId: state.sortColumn, direction: state.sortDirection } });
-}
-
-let sessionsAutoLoadScheduled = false;
-
-/** Clicks Load more when its button is near the viewport, so the list grows as the user scrolls. */
-function loadMoreSessionsWhenNearViewport(): void {
-	sessionsAutoLoadScheduled = false;
-	const button = document.querySelector<HTMLButtonElement>('#sessions-panel-body .data-table-load-more');
-	// `offsetParent` is null while the Sessions tab is hidden; loading then would drain the whole list.
-	if (!button || button.disabled || button.offsetParent === null) { return; }
-	if (button.getBoundingClientRect().top <= window.innerHeight + SESSIONS_LOAD_MORE_MARGIN_PX) {
-		button.click();
-	}
-}
-
-/** Coalesces auto-load checks into one per frame. */
-function scheduleSessionsAutoLoad(): void {
-	if (sessionsAutoLoadScheduled) { return; }
-	sessionsAutoLoadScheduled = true;
-	requestAnimationFrame(loadMoreSessionsWhenNearViewport);
 }
 
 /** Builds the "Columns" toggle button and its checkbox dropdown for showing/hiding optional columns. */
@@ -1516,32 +1440,8 @@ function setupSessionsTableHandlers(): void {
 			rerenderSessionsTableFromFirstPage();
 		}
 	});
-	setupSessionSearchInput();
 	renderSessionsLookbackSelector();
 	setupSessionColumnsMenu();
-	installSessionsAutoLoadListeners();
-	scheduleSessionsAutoLoad();
-}
-
-/** The search box sits outside `#sessions-panel-body`, so typing never re-renders the input itself. */
-function setupSessionSearchInput(): void {
-	const searchInput = document.getElementById('sessions-search-input') as HTMLInputElement | null;
-	if (!searchInput) { return; }
-	searchInput.value = sessionSearchQuery;
-	searchInput.addEventListener('input', () => {
-		sessionSearchQuery = searchInput.value;
-		rerenderSessionsTableFromFirstPage();
-	});
-}
-
-let sessionsScrollListenersInstalled = false;
-
-/** Installed once: the page scrolls as a whole, so one window listener serves every shell rebuild. */
-function installSessionsAutoLoadListeners(): void {
-	if (sessionsScrollListenersInstalled) { return; }
-	sessionsScrollListenersInstalled = true;
-	window.addEventListener('scroll', scheduleSessionsAutoLoad, { passive: true });
-	window.addEventListener('resize', scheduleSessionsAutoLoad);
 }
 
 let _documentClickClosesColumnsMenu = false;
@@ -1563,7 +1463,6 @@ function setupSessionColumnsMenu(): void {
 		const container = document.getElementById('sessions-table-container');
 		if (container) { setHtml(container, buildSessionsTableHtml(cachedTodaySessions)); }
 		saveSessionColumnSettings();
-		scheduleSessionsAutoLoad();
 	});
 	// Attached once ever (not per re-render) and re-queries the live menu element on
 	// each click, so it keeps working across full DOM rebuilds without leaking listeners.
@@ -1588,7 +1487,6 @@ function renderSessionsLookbackSelector(): void {
 		label: '',
 		onChange: (value) => {
 			sessionsLookback = value as Period;
-			usageState.patch({ sessionsLookback });
 			setDataTableState(SESSIONS_TABLE_ID, { page: 1 });
 			refreshSessionsPanelBody();
 		},
@@ -1607,13 +1505,11 @@ function refreshSessionsPanelBody(): void {
 	if (!body) { return; }
 	if (sessionsLookback === 'today') {
 		setHtml(body, renderTodaySessionsTable(latestTodaySessions));
-		scheduleSessionsAutoLoad();
 		return;
 	}
 	const cached = recentSessionsCache[sessionsLookback];
 	if (cached) {
 		setHtml(body, renderTodaySessionsTable(cached));
-		scheduleSessionsAutoLoad();
 		return;
 	}
 	setHtml(body, `<div style="color: var(--text-secondary); font-size: 13px; padding: 16px;">Loading sessions for ${PERIOD_LABELS[sessionsLookback]}…</div>`);
@@ -4329,11 +4225,10 @@ function buildSessionsTabPanelHtml(stats: UsageAnalysisStats): string {
 			<div class="section">
 				<div class="section-title" style="display:flex; align-items:center; gap:8px;">
 					<span>📋</span><span>Recent Sessions</span>
-					<input type="search" id="sessions-search-input" class="sessions-search-input" placeholder="Search sessions…" aria-label="Search sessions" value="${escapeHtml(sessionSearchQuery)}" autocomplete="off" />
-					<span id="sessions-lookback-wrapper"></span>
+					<span id="sessions-lookback-wrapper" style="margin-left:auto;"></span>
 					${buildSessionColumnsMenuHtml()}
 				</div>
-				<div class="section-subtitle">Individual session breakdown for the selected period — sorted by last active (most recent first) until you pick another column.</div>
+				<div class="section-subtitle">Individual session breakdown for the selected period — sorted by number of interactions (most active first).</div>
 				<div id="sessions-panel-body" style="margin-top: 12px;">
 					${bodyHtml}
 				</div>

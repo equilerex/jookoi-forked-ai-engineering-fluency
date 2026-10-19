@@ -896,25 +896,6 @@ background: var(--bg-tertiary);
 	min-width: 1050px;
 }
 
-/* Recent Sessions search box, pushed to the right of the section title */
-.sessions-search-input {
-	margin-left: auto;
-	width: 220px;
-	max-width: 40%;
-	box-sizing: border-box;
-	padding: 2px 8px;
-	font-size: 12px;
-	color: var(--vscode-input-foreground, var(--text-primary));
-	background: var(--vscode-input-background, var(--bg-secondary));
-	border: 1px solid var(--vscode-input-border, var(--border-subtle));
-	border-radius: 4px;
-}
-
-.sessions-search-input:focus {
-	outline: none;
-	border-color: var(--vscode-focusBorder, var(--border-color));
-}
-
 .sessions-table td.session-col-rank {
 	color: var(--text-secondary);
 }

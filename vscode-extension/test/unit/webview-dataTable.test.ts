@@ -117,34 +117,6 @@ test('dataTable: pageSize false shows every row without pager or summary', () =>
 	assert.equal(getDataTablePage(rows(42), columns, state(), { pageSize: false }).pageCount, 1);
 });
 
-test('dataTable: loadMore accumulates rows behind a Load more button until every row is loaded', () => {
-	const { dom, doc, root } = mount(options('test-load-more', { rows: rows(25), pageSize: 10, loadMore: true }));
-	const loadedCount = (): number => root().querySelectorAll('tbody tr').length;
-	const loadMoreButton = (): HTMLElement | null => root().querySelector<HTMLElement>('.data-table-load-more');
-
-	assert.equal(loadedCount(), 10);
-	assert.equal(root().querySelector('.data-table-page-info')?.textContent, 'Showing 1–10 of 25');
-	assert.equal(loadMoreButton()?.textContent, 'Load more');
-	assert.equal(root().querySelector('[data-table-direction="previous"]'), null, 'cumulative mode has no Previous button');
-
-	click(dom, loadMoreButton());
-	assert.equal(loadedCount(), 20, 'the first batch stays rendered and the next one is appended');
-	assert.equal(doc.activeElement?.getAttribute('data-table-direction'), 'next', 'focus stays on Load more across the re-render');
-
-	click(dom, loadMoreButton());
-	assert.equal(loadedCount(), 25);
-	assert.equal(loadMoreButton(), null, 'no button once every row is loaded');
-	dom.window.close();
-});
-
-test('dataTable: a sort change in loadMore mode starts again from the first batch', () => {
-	const { dom, root } = mount(options('test-load-more-sort', { rows: rows(25), pageSize: 10, loadMore: true }));
-	click(dom, root().querySelector('.data-table-load-more'));
-	click(dom, root().querySelector('[data-table-sort="count"]'));
-	assert.equal(root().querySelectorAll('tbody tr').length, 10);
-	dom.window.close();
-});
-
 test('dataTable: clamps the active page when rows shrink', () => {
 	const tableId = 'test-clamp';
 	renderDataTable(options(tableId));

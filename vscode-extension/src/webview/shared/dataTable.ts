@@ -93,11 +93,6 @@ export interface DataTableOptions<Row> {
 	initialSort?: DataTableSort;
 	/** Rows per page; `false` shows every row. Defaults to `DEFAULT_DATA_TABLE_PAGE_SIZE`. */
 	pageSize?: number | false;
-	/**
-	 * Cumulative paging: each page keeps the rows before it and adds `pageSize` more behind a
-	 * "Load more" button, instead of replacing them. Requires a numeric `pageSize`.
-	 */
-	loadMore?: boolean;
 	emptyMessage?: string;
 	/** Extra classes for the `<table>`, e.g. the `data-table--fixed` / `--compact` variants. */
 	className?: string;
@@ -132,7 +127,6 @@ export interface DataTablePage<Row> {
 export interface DataTablePageOptions<Row> {
 	filterRows?: DataTableOptions<Row>['filterRows'];
 	pageSize?: number | false;
-	loadMore?: boolean;
 	groupBy?: DataTableGroupBy<Row>;
 }
 
@@ -288,18 +282,6 @@ export function getDataTablePage<Row>(
 		: Math.max(1, options.pageSize ?? DEFAULT_DATA_TABLE_PAGE_SIZE);
 	const pageCount = Math.max(1, Math.ceil(sorted.length / pageSize));
 	const page = Math.min(Math.max(1, state.page), pageCount);
-	if (options.loadMore && options.pageSize !== false) {
-		const loadedCount = Math.min(page * pageSize, sorted.length);
-		return {
-			rows: sorted.slice(0, loadedCount),
-			filteredCount: sorted.length,
-			page,
-			pageCount,
-			firstRow: sorted.length === 0 ? 0 : 1,
-			lastRow: loadedCount,
-			offset: 0,
-		};
-	}
 	const offset = (page - 1) * pageSize;
 	return {
 		rows: sorted.slice(offset, offset + pageSize),
@@ -425,19 +407,8 @@ function pagerButton(tableId: string, direction: 'previous' | 'next', page: numb
 	return `<button type="button" class="data-table-page-button" data-table-id="${escapeHtml(tableId)}" data-table-direction="${direction}" data-table-page="${page}"${disabled ? ' disabled' : ''}>${escapeHtml(label)}</button>`;
 }
 
-function renderLoadMore<Row>(options: DataTableOptions<Row>, page: DataTablePage<Row>): string {
-	const summary = `<span class="data-table-page-info">${escapeHtml(localizeFormat('dataTable.showing', page.firstRow, page.lastRow, page.filteredCount))}</span>`;
-	const hasMore = page.lastRow < page.filteredCount;
-	// `data-table-direction="next"` keeps keyboard focus on the button across the re-render.
-	const button = hasMore
-		? `<button type="button" class="data-table-page-button data-table-load-more" data-table-id="${escapeHtml(options.tableId)}" data-table-direction="next" data-table-page="${page.page + 1}">${escapeHtml(localize('dataTable.loadMore'))}</button>`
-		: '';
-	return `<nav class="data-table-pager" aria-label="${escapeHtml(options.ariaLabel)}">${summary}${button}</nav>`;
-}
-
 function renderPager<Row>(options: DataTableOptions<Row>, page: DataTablePage<Row>): string {
 	if (options.pageSize === false || page.filteredCount === 0) { return ''; }
-	if (options.loadMore) { return renderLoadMore(options, page); }
 	if (page.pageCount <= 1) {
 		return `<div class="data-table-summary">${escapeHtml(localizeFormat('dataTable.showing', page.firstRow, page.lastRow, page.filteredCount))}</div>`;
 	}
