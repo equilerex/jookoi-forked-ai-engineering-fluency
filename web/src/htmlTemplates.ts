@@ -5,6 +5,7 @@ import automaticToolsData from '../../src/automaticTools.json';
 import { getWebviewLocalization, getSystemLocale } from './statsService';
 import { LOGVIEWER_ENHANCER_STYLES, LOGVIEWER_ENHANCER_SCRIPT } from './logviewerEnhancer';
 import { PATH_LINK_MODE_STORAGE_KEY, PATH_LINK_STYLES, PATH_LINKIFIER_SCRIPT } from './pathLinks';
+import { RECENT_SESSIONS_STYLES, RECENT_SESSIONS_SCRIPT } from './recentSessionsTable';
 
 const VSCODE_DARK_VARS = `
 :root {
@@ -2072,6 +2073,7 @@ export function renderFullHtml(options: {
     if (options.isEmbed) {
         // Embedded View (Rendered inside view frame with top padding and distinct active styling)
         const isSessionTab = options.activeTab === 'session';
+        const isUsagePage = options.scriptFile === 'usage.js';
         return `<!DOCTYPE html>
 <html lang="${locale}">
 <head>
@@ -2085,6 +2087,7 @@ export function renderFullHtml(options: {
         ${VIEW_EMBED_STYLES}
         ${isSessionTab ? LOGVIEWER_ENHANCER_STYLES : ''}
         ${PATH_LINK_STYLES}
+        ${isUsagePage ? RECENT_SESSIONS_STYLES : ''}
     </style>
 </head>
 <body data-vscode-theme-kind="vscode-dark">
@@ -2098,6 +2101,7 @@ export function renderFullHtml(options: {
         ${JSON_CONFIG_SCRIPT}
     </script>
     <script src="/static/${options.scriptFile}"></script>
+    ${isUsagePage ? `<script>${RECENT_SESSIONS_SCRIPT}</script>` : ''}
     ${isSessionTab ? `<script>${LOGVIEWER_ENHANCER_SCRIPT}</script>` : ''}
     <script>${PATH_LINKIFIER_SCRIPT}</script>
     ${options.afterBundleScript ? `<script>${options.afterBundleScript}</script>` : ''}
