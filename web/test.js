@@ -34,6 +34,7 @@ async function runTests() {
     { path: '/api/recent-sessions?period=last30', expectedStatus: 200, checkBody: '"sessions":' },
     { path: '/details?embed=1', expectedStatus: 200, checkBody: '__INITIAL_DETAILS__' },
     { path: '/usage?embed=1', expectedStatus: 200, checkBody: '__INITIAL_USAGE__' },
+    { path: '/chart?embed=1', expectedStatus: 200, checkBody: '/api/open-path' },
     { path: '/?view=usage', expectedStatus: 200, checkBody: '__INITIAL_USAGE__' },
     { path: '/?tab=chart', expectedStatus: 200, checkBody: '__INITIAL_CHART__' },
   ];

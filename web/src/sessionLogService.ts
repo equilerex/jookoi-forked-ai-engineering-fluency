@@ -20,6 +20,7 @@ import type { SessionLogData, ChatTurn, ContextReferenceUsage, ActualUsage } fro
 import type { IEcosystemAdapter } from '../../src/ecosystemAdapter';
 import { sessionEditorName, getSessionFiles, extractSessionTitleAndWorkspace } from './statsService';
 import { getSessionMeta } from '../../cli/src/helpers';
+import { buildClaudeCodeTurnsForWeb } from './claudeTurnsWeb';
 
 function detectIsDeltaBased(lines: string[]): boolean {
     if (lines.length === 0) { return false; }
@@ -221,7 +222,7 @@ function buildJsonSessionTurns(data: any): ChatTurn[] {
     return turns;
 }
 
-export async function getSessionLogData(sessionFilePath: string): Promise<SessionLogData & { workspace?: string | null }> {
+export async function getSessionLogData(sessionFilePath: string): Promise<SessionLogData & { workspace?: string | null; workspacePath?: string | null }> {
     const backingPath = getSessionBackingPath(sessionFilePath);
     let stat = { size: 0, mtime: new Date() };
     try {
@@ -240,7 +241,9 @@ export async function getSessionLogData(sessionFilePath: string): Promise<Sessio
     const eco = getEcosystems().find(e => e.handles(sessionFilePath));
     if (eco?.buildTurns) {
         try {
-            const res = await eco.buildTurns(sessionFilePath);
+            const res = eco.id === 'claudecode'
+                ? await buildClaudeCodeTurnsForWeb(sessionFilePath)
+                : await eco.buildTurns(sessionFilePath);
             turns = res.turns;
             actualTokens = res.actualTokens ?? 0;
         } catch (err) {
@@ -277,6 +280,8 @@ export async function getSessionLogData(sessionFilePath: string): Promise<Sessio
         file: sessionFilePath,
         title: resolvedTitle,
         workspace: resolved.workspace,
+        // Project folder the session ran in. Relative paths in its text resolve against it.
+        workspacePath: resolved.workspacePath ?? null,
         editorSource: editorName,
         editorName,
         size: stat.size,
