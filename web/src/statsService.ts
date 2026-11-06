@@ -29,7 +29,7 @@ import { createEmptyContextRefs, calculateEstimatedCost } from '../../src/tokenE
 import { addModelUsage } from '../../src/statsHelpers';
 import { toLocalDayKey } from '../../src/utils/dayKeys';
 import { calculateMaturityScores, getFluencyLevelData } from '../../src/maturityScoring';
-import { getToolFamilies } from '../../vscode-extension/src/toolFamilies';
+import { mergeToolFamilies } from '../../src/toolFamilies';
 import { detectEditorSource } from '../../src/workspaceHelpers';
 import { getEditorIconByName } from '../../vscode-extension/src/editorIcons';
 import { buildWebviewLocalization } from '../../vscode-extension/src/webviewLocalization';
@@ -773,7 +773,7 @@ async function buildDiagnosticsDataInternal(files: string[]) {
         }
     }, 16);
     const sessionFiles = rawSessionFiles.filter((f): f is { file: string; size: number; modified: string } => f !== undefined);
-    const toolFamilies = getToolFamilies();
+    const toolFamilies = mergeToolFamilies([]);
     const detailedSessionFiles = await buildDetailedSessionFiles(sessionFiles);
 
     return {

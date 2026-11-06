@@ -24,9 +24,6 @@ async function main() {
     target: 'node22',
     minify: production,
     sourcemap: !production,
-    alias: {
-      vscode: path.join(__dirname, '..', 'cli', 'src', 'vscode-stub.ts'),
-    },
     nodePaths: [
       path.join(__dirname, 'node_modules'),
       path.join(__dirname, '..', 'desktop', 'node_modules'),
