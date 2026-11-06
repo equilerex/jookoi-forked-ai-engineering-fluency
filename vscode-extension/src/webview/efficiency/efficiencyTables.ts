@@ -11,15 +11,39 @@
 
 import { renderDataTable, type DataTableColumn } from '../shared/dataTable';
 import { escapeHtml, formatCompact } from '../shared/formatUtils';
+import { localize } from '../shared/localization';
 import type {
 	EfficiencyDelta,
 	ModelComparison,
 	ModelComparisonRow,
 	SkillImpact,
 	SkillImpactMetric,
+	SkillUsageRow,
 } from '../../../../src/efficiencyAnalysis';
 
 export const MODEL_COMPARE_TABLE_ID = 'efficiency-model-compare';
+export const SKILL_USAGE_TABLE_ID = 'efficiency-skill-usage';
+
+/** Invocations per skill for the current scope, most-used first, with what each skill does. */
+export function renderSkillUsageTable(rows: readonly SkillUsageRow[]): string {
+	return renderDataTable<SkillUsageRow>({
+		tableId: SKILL_USAGE_TABLE_ID,
+		ariaLabel: localize('efficiency.skills.table.heading'),
+		rows,
+		columns: [
+			{ id: 'skill', label: localize('efficiency.skills.col.skill'), sortValue: r => r.name, render: r => r.name },
+			{
+				id: 'description',
+				label: localize('efficiency.skills.col.description'),
+				sortValue: r => r.description || null,
+				cellClassName: () => 'skill-usage-description',
+				render: r => r.description || '—',
+			},
+			{ id: 'invocations', label: localize('efficiency.skills.col.invocations'), align: 'right', sortValue: r => r.count, render: r => formatCompact(r.count) },
+		],
+		initialSort: { columnId: 'invocations', direction: 'desc' },
+	});
+}
 
 /** Stable per skill, so each card keeps its own sort across re-renders. */
 export function skillImpactTableId(skill: string): string {
@@ -31,6 +55,8 @@ export function fmtValue(v: number | null, unit: EfficiencyDelta['unit']): strin
 	switch (unit) {
 		case 'percent': return `${(v * 100).toFixed(1)}%`;
 		case 'minutes': return `${v.toFixed(1)} min`;
+		case 'seconds': return `${v.toFixed(1)} s`;
+		case 'tokensPerSecond': return `${v.toFixed(1)} tok/s`;
 		case 'tokens': return formatCompact(Math.round(v));
 		case 'currency': return `$${v.toFixed(2)}`;
 		case 'ratio': return v.toFixed(1);
@@ -100,7 +126,7 @@ export function renderSkillImpactTable(impact: SkillImpact): string {
 /** The "Better" cell — only decisive wins get a chip, so ties read as ties. */
 function comparisonWinnerCell(r: ModelComparisonRow): string {
 	if (r.significant && (r.winner === 'a' || r.winner === 'b')) {
-		return `<span class="model-win-chip">${r.winner.toUpperCase()}</span>`;
+		return `<span class="model-win-chip model-win-${r.winner}">${r.winner.toUpperCase()}</span>`;
 	}
 	return r.winner === 'tie' ? '<span class="model-win-chip tie">tie</span>' : '';
 }
@@ -114,7 +140,7 @@ function comparisonWinnerSortValue(r: ModelComparisonRow): string | null {
 function comparisonSideHeader(tag: 'A' | 'B', side: ModelComparison['a']): Pick<DataTableColumn<ModelComparisonRow>, 'label' | 'headerHtml'> {
 	return {
 		label: `${tag} · ${side.displayName} ${side.periodLabel}`,
-		headerHtml: `${tag} · ${escapeHtml(side.displayName)}<span class="th-sub">${escapeHtml(side.periodLabel)}</span>`,
+		headerHtml: `<span class="model-th-tag model-th-${tag.toLowerCase()}">${tag} · ${escapeHtml(side.displayName)}</span><span class="th-sub">${escapeHtml(side.periodLabel)}</span>`,
 	};
 }
 

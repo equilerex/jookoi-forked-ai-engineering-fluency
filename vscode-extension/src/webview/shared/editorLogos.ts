@@ -41,7 +41,7 @@ import vscode from '../../../../assets/tool-logos/vscode.svg';
 import vscodium from '../../../../assets/tool-logos/vscodium.svg';
 import windsurfDark from '../../../../assets/tool-logos/windsurf-dark.svg';
 import windsurf from '../../../../assets/tool-logos/windsurf.svg';
-import { getEditorIconByName } from '../../editorIcons';
+import { getEditorIconByName } from '../../../../src/editorIcons';
 
 /** A logo, with an optional variant for dark themes (used where the mark is a single flat colour). */
 export interface EditorLogo {
@@ -61,6 +61,7 @@ export const EDITOR_LOGOS: Readonly<Record<string, EditorLogo>> = {
 	'Antigravity': { light: antigravity },
 	'Claude Code': CLAUDE_CODE,
 	'Claude Code CLI': CLAUDE_CODE,
+	'Claude Code (VS Code)': CLAUDE_CODE,
 	'Claude Desktop': CLAUDE,
 	'Claude Desktop Cowork': CLAUDE,
 	'Codex CLI': { light: openai, dark: openaiDark },

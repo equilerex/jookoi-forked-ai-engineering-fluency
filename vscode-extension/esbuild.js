@@ -1,6 +1,7 @@
 const esbuild = require("esbuild");
 const fs = require("fs");
 const path = require("path");
+const { buildLocalizationSidecars } = require("./scripts/webviewLocalizationSidecars");
 
 const production = process.argv.includes('--production');
 const watch = process.argv.includes('--watch');
@@ -80,9 +81,11 @@ async function main() {
 			maturity: 'src/webview/maturity/main.ts',
 			dashboard: 'src/webview/dashboard/main.ts',
 			'fluency-level-viewer': 'src/webview/fluency-level-viewer/main.ts',
+			'badge-setup': 'src/webview/badge-setup/main.ts',
 			environmental: 'src/webview/environmental/main.ts',
 			efficiency: 'src/webview/efficiency/main.ts',
 			whatsnew: 'src/webview/whatsnew/main.ts',
+			'repo-heatmap': 'src/webview/repoHeatmap/main.ts',
 		},
 		bundle: true,
 		format: 'iife',
@@ -138,27 +141,17 @@ async function main() {
 	// so the hosts need no fallback logic: the English file already carries the
 	// English text for any key a locale has not translated.
 	{
-		// webviewKeys.json is the single manifest of which keys the webviews need —
-		// the same one the generated English fallback is built from, so the sidecars
-		// and that fallback can never cover different key sets.
-		const keys = require('./src/webview/shared/webviewKeys.json');
-		if (keys.length < 100) {
-			throw new Error(`webviewKeys.json lists only ${keys.length} keys — refusing to ship a near-empty dictionary.`);
-		}
-		const englishBundle = require('./package.nls.json');
-		const locales = { 'en': englishBundle, 'zh-cn': require('./package.nls.zh-cn.json') };
-		for (const [locale, bundle] of Object.entries(locales)) {
-			const dictionary = {};
-			for (const key of keys) {
-				dictionary[key] = bundle[key] ?? englishBundle[key] ?? key;
-			}
-			dictionary['__language__'] = locale;
+		// Generation lives in scripts/webviewLocalizationSidecars.js so the unit test exercises
+		// this exact code. It reads webviewKeys.json — the same manifest the generated English
+		// fallback is built from — so the sidecars and that fallback cover the same key set.
+		const sidecars = buildLocalizationSidecars();
+		for (const [locale, dictionary] of Object.entries(sidecars)) {
 			fs.writeFileSync(
 				path.join(webviewDistDir, `localization.${locale}.json`),
 				`${JSON.stringify(dictionary, null, 2)}\n`,
 			);
 		}
-		console.log(`[build] wrote ${Object.keys(locales).length} webview localization sidecar(s), ${keys.length} keys each`);
+		console.log(`[build] wrote ${Object.keys(sidecars).length} webview localization sidecar(s), ${Object.keys(Object.values(sidecars)[0]).length - 1} keys each`);
 	}
 
 	// Copy the codicon font (icon font VS Code itself uses) into dist/webview/codicons/ so
@@ -175,6 +168,22 @@ async function main() {
 				fs.copyFileSync(codiconSrc, codiconDst);
 			}
 		}
+	}
+
+	// Bundle the badge app so the Badge setup view can reveal the folder the user copies to the badge.
+	const badgeAppSrc = path.join(__dirname, '..', 'badge-app', 'fluency');
+	if (fs.existsSync(badgeAppSrc)) {
+		fs.cpSync(badgeAppSrc, path.join(__dirname, 'dist', 'badge-app', 'fluency'), {
+			recursive: true,
+			filter: (source) => path.basename(source) !== '__pycache__',
+		});
+	}
+
+	// The Universe badge photo for the Badge setup view (optional: the view skips it when it is missing).
+	const badgeImageSrc = path.join(__dirname, 'media', 'badge-universe.jpg');
+	if (fs.existsSync(badgeImageSrc)) {
+		fs.mkdirSync(path.join(__dirname, 'dist', 'webview'), { recursive: true });
+		fs.copyFileSync(badgeImageSrc, path.join(__dirname, 'dist', 'webview', 'badge-universe.jpg'));
 	}
 
 	// Copy sql.js WASM file to dist/ for OpenCode SQLite support

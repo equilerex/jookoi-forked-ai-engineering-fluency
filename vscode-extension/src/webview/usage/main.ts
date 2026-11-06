@@ -3,16 +3,24 @@ import { el, setHtml } from '../shared/domUtils';
 import { createPeriodSelector, PERIOD_LABELS, type Period } from '../shared/periodSelector';
 import { navButtonsHtml } from '../shared/buttonConfig';
 import { ContextReferenceUsage, getTotalContextRefs } from '../shared/contextRefUtils';
+import {
+	AGENT_SESSIONS_PARTIAL_NOTE_KEY,
+	REFRESH_GITHUB_ACTIVITY_ACTION,
+	REPO_PR_PARTIAL_NOTE_KEY,
+	isEmptyActivitySnapshot,
+	shouldRenderErrorOnlyRow,
+	snapshotFreshnessHtml,
+} from './snapshotFreshness';
 import { buildFilterPillGroupHtml, type SessionFilterOption } from './sessionFilterBar';
-import { escapeHtml, formatCompact, formatCost, formatDurationShort, formatFileSize, formatFixed, formatNumber, formatPercent, getTimeSince, safeSectionHtml, setFormatLocale } from '../shared/formatUtils';
+import { escapeHtml, formatCompact, formatCost, formatDurationShort, formatFileSize, formatFixed, formatNumber, formatPercent, safeSectionHtml, setFormatLocale } from '../shared/formatUtils';
 import { wireExtensionPointButtons } from '../shared/extensionPoints';
 import { localize, localizeFormat } from '../shared/localization';
 import { createViewStateManager } from '../shared/viewState';
 import { applyWebviewLocale } from '../shared/webviewLocale';
 import { RECENT_SESSION_PERIODS, sanitizeRecentSessionBuckets } from './recentSessionsSanitizer';
+import { markUsageLoadingInactive, renderUsageLoadingState as renderUsageLoadingCard, resetUsageLoadingSteps, updateUsageLoadingProgress as applyUsageLoadingProgress } from './usageLoadingCard';
 import { renderCcrCheckButtonHtml, wireCcrActivityButtons, renderCcrActivityResult, replayCcrActivityResults } from './ccrActivity';
 import {
-	hasContextWindowData,
 	sanitizeAutomaticCompactions,
 	sanitizeContextPressure,
 	sanitizeContextWindow,
@@ -20,12 +28,9 @@ import {
 // Imported from the shared contract rather than re-declared locally, so a shape
 // change in src/types.ts surfaces here as a type error instead of silently
 // drifting out of sync with what the extension host actually sends.
-import type { AutomaticCompactionStats, AvailableToolEntry, ContextPressureStats, ContextWindowStats, MemoryFilesAnalysisView, ServerMemoriesAnalysisView, ToolCurationAnalysis } from '../../../../src/types';
-import { CONTEXT_NEAR_LIMIT_RATIO } from '../../../../src/types';
+import type { AgentSource, AgentUsage, AutomaticCompactionStats, AvailableToolEntry, ContextPressureStats, ContextWindowStats, MemoryFilesAnalysisView, ServerMemoriesAnalysisView, ToolCurationAnalysis } from '../../../../src/types';
 import { getSessionContextFillPercent, isSessionNearContextLimit } from '../../../../src/utils/contextFill';
 
-/** The near-limit threshold as a whole percentage, for display in copy. */
-const NEAR_LIMIT_PERCENT = Math.round(CONTEXT_NEAR_LIMIT_RATIO * 100);
 import type { McpToolUsage, ModeUsage, ModelSwitchingAnalysis as BaseModelSwitchingAnalysis, ToolCallUsage } from '../shared/types';
 // CSS imported as text via esbuild
 import themeStyles from '../shared/theme.css';
@@ -33,25 +38,30 @@ import dataTableStyles from '../shared/dataTable.css';
 import { renderDataTable, rerenderDataTable, setDataTableState, type DataTableColumn, type DataTableSortValue } from '../shared/dataTable';
 import styles from './styles.css';
 import { getWindowData } from '../../../../src/webview/shared/dataLoader';
+import type { UsageAnalysisViewData } from '../../../../src/usageAnalysisViewBuilder';
 import { registerMessageHandler } from '../shared/messageHandler';
 import { getModelDisplayName, getModelLookupCandidates } from '../../../../src/webview/shared/modelUtils';
 import { getModelBillingProvider } from '../../../../src/chartDataBuilder';
-import { getLongContextInfo } from '../../../../src/tokenEstimation';
+import { buildContextWindowSectionHtml, NEAR_LIMIT_PERCENT } from './contextWindowSection';
+import { buildRouterSectionHtml, sanitizeRouterPayload, type RouterPayload } from './hydraFusionCard';
 import { deriveModelEfficiencyRates, computeEfficiencyLowUsageThreshold, computeLongTailModels } from '../../../../src/modelEfficiency';
 import { buildCorrectionImprovementPrompt } from '../../../../src/correctionDetection';
-import type { ModelPricing, ModelEfficiencyUsage, ModelEfficiencyCounters } from '../../../../src/types';
+import type { ModelEfficiencyUsage, ModelEfficiencyCounters } from '../../../../src/types';
 import { sanitizeCustomizationMatrix } from './customizationSanitizer';
 import { statusBadgeHtml, type CustomizationTypeStatus } from './statusBadge';
 import { buildCustomizationSectionHtml } from './customizationMatrixSection';
 import { buildTabStripHtml, type UsageTabStripInput } from './tabStripHtml';
 import { formatToolEditors, sanitizeToolCallsByEditor } from './toolEditors';
 import { buildToolExecutionSectionsHtml } from './toolExecutionHtml';
+import { buildToolFamilySectionHtml, sanitizeToolFamilies } from './toolFamilySection';
+import type { ToolFamily } from '../../../../src/toolFamilies';
 import { buildMcpPeriodTablesHtml, buildToolPeriodTableHtml, isMcpPeriodView, type McpPeriodView } from './toolPeriodTable';
 import { sanitizeToolOutcomeMaps, sanitizeMcpOutcomeMaps } from './toolOutcomeSanitizer';
 import { renderContextRefTable } from './contextRefTableHtml';
 import { shouldListAccountBudgets } from '../../githubAccountBudgets';
 import { applyBillingFields, sanitizeAccountBudgets, sanitizeCopilotApiBalance, type AccountBudgetView, type CopilotApiBalance } from './billingStatsSanitizer';
-import { billingExtGroupCostsHtml } from './billingCoverage';
+import { accountBudgetsHtml } from '../shared/accountBudgets';
+import { BILLING_DETAILS_BUTTON_ID, billingDetailsLinkHtml, billingOtherSessionsCostUsd, billingTabBodyHtml } from './billingCoverage';
 import { type ContextRefRow } from './contextRefRows';
 import { sanitizeAgentSessionsData, toSafeNumber, toSafeHttpUrl, type AgentRepoSummary, type AgentSessionsResult } from './agentSessionsSanitizer';
 import { isSwitchableTab } from './switchableTabs';
@@ -80,6 +90,8 @@ type UsageAnalysisPeriod = {
 	sessions: number;
 	toolCalls: ToolCallUsage;
 	modeUsage: ModeUsage;
+	/** Custom agents the user selected; absent when none were used in the period. */
+	agentUsage?: AgentUsage;
 	contextReferences: ContextReferenceUsage;
 	mcpTools: McpToolUsage;
 	modelSwitching: ModelSwitchingAnalysis;
@@ -207,6 +219,7 @@ type UsageAnalysisStats = {
 	readinessAvailable?: boolean;
 	currentWorkspacePaths?: string[];
 	suppressedUnknownTools?: string[];
+	toolFamilies?: ToolFamily[];
 	/** Per-tool, per-editor call counts (last 30 days); used to tag unknown-tool issue reports with the editor. */
 	toolCallsByEditor?: { [tool: string]: { [editor: string]: number } };
 	todaySessions?: TodaySessionSummary[];
@@ -222,6 +235,8 @@ type UsageAnalysisStats = {
 	curationAnalysis?: ToolCurationAnalysis | null;
 	/** Compact projection of the memory-files hygiene analysis (counts/rollup scalars only — no per-file paths). Null when none found. */
 	memoryFilesAnalysis?: MemoryFilesAnalysisView | null;
+	/** Copilot Fusion router aggregate per period; a period is null when no session routed through it. */
+	hydraFusion?: RouterPayload;
 	/**
 	 * Compact projection of this repository's server-side Copilot memory store. Unlike
 	 * `memoryFilesAnalysis` this carries fact text, because for server memories the fact is
@@ -258,7 +273,8 @@ interface CustomizationFileEntry {
 	icon?: string;
 	label?: string;
 	name?: string;
-	lastModified?: string;
+	/** Null when unknown, as the shared CustomizationFileEntry (src/types.ts) sends it. */
+	lastModified?: string | null;
 	isStale?: boolean;
 	category?: 'copilot' | 'non-copilot';
 }
@@ -362,6 +378,29 @@ function traceCurationOnce(key: string, stage: string, details?: Record<string, 
 
 type WorktreeBackgroundScanData = { scannedAt: string; totalBytes: number; worktreeCount: number; worktrees: unknown[] };
 type InitialUsageData = UsageAnalysisStats & { customizationMatrix?: WorkspaceCustomizationMatrix | null; missedPotential?: MissedPotentialWorkspace[]; worktreeScanRoots?: string[]; localization?: Record<string, string>; worktreeBackgroundScan?: WorktreeBackgroundScanData | null };
+
+/*
+ * Compile-time contract with the shared payload builder (src/usageAnalysisViewBuilder.ts), which
+ * the extension, the CLI and the desktop app all call. The view keeps local copies of the nested
+ * types, so the contract is checked field by field, in both directions — a field added on one
+ * side only is a compile error, not a silently blank section in some host (#2316):
+ *  - every field the builder emits is declared here;
+ *  - every field declared here is on the shared payload, or listed as a host extra below;
+ *  - every shared field's value, as the builder types it, is accepted by this view's type.
+ */
+/** Fields this view reads that hosts add on top of the shared payload (extension-only today). */
+type UsageHostExtraField = 'serverMemoriesAnalysis' | 'sessionColumnSettings' | 'copilotApiBalance' | 'accountBudgets' | 'monthBillingGroupCosts';
+type UsageFieldsMissingFromView = Exclude<keyof UsageAnalysisViewData, keyof UsageAnalysisStats>;
+type UsageFieldsNotFromBuilder = Exclude<keyof UsageAnalysisStats, keyof UsageAnalysisViewData | UsageHostExtraField>;
+type UsageFieldsWithIncompatibleTypes = {
+	[K in keyof UsageAnalysisViewData & keyof UsageAnalysisStats]: UsageAnalysisViewData[K] extends UsageAnalysisStats[K] ? never : K
+}[keyof UsageAnalysisViewData & keyof UsageAnalysisStats];
+type AssertNever<T extends never> = T;
+export type UsagePayloadContract = [
+	AssertNever<UsageFieldsMissingFromView>,
+	AssertNever<UsageFieldsNotFromBuilder>,
+	AssertNever<UsageFieldsWithIncompatibleTypes>,
+];
 const initialData = getWindowData<InitialUsageData>('__INITIAL_USAGE__');
 
 // Initialize localization for webview
@@ -459,7 +498,7 @@ type WorktreeScanStatus = {
 };
 
 // Worktree discovery tab state
-let worktreeRoots: string[] = initialData?.worktreeScanRoots ? [...initialData.worktreeScanRoots] : [];
+const worktreeRoots: string[] = initialData?.worktreeScanRoots ? [...initialData.worktreeScanRoots] : [];
 let worktreeResults: WorktreeResult[] = initialData?.worktreeBackgroundScan
 	? initialData.worktreeBackgroundScan.worktrees.map(sanitizeWorktreeResult)
 	: [];
@@ -503,196 +542,31 @@ type WorktreeCleanupDiagnostics = {
 /** Live state of a "Delete anyway…" retry on a cleanup-log row, keyed by worktree path. */
 type WorktreeRetryState = { status: "running" | "deleted" | "error"; reason?: string };
 const worktreeRetryState = new Map<string, WorktreeRetryState>();
+/** Bytes freed per deleted worktree path, captured from the scan row just before it leaves the list. */
+const worktreeDeletedBytes = new Map<string, number>();
 type WorktreeCleanupLogEntry = { path: string; branch: string; repoLabel: string; status: WorktreeCleanupOutcome; reason?: string; diagnostics?: WorktreeCleanupDiagnostics };
 let worktreeCleanupLog: WorktreeCleanupLogEntry[] = [];
+/** One worktree of the running cleanup: processed, current or still waiting. */
+type WorktreeCleanupTarget = { path: string; branch: string; repoLabel: string };
+/** Every worktree of the running cleanup in processing order; clicks while it runs append to it. */
+let worktreeCleanupQueue: WorktreeCleanupTarget[] = [];
+/** The worktree being deleted right now (null between items and while idle). */
+let worktreeCleanupCurrent: WorktreeCleanupTarget | null = null;
+/** Not-yet-finished worktrees per repository label, rebuilt on each repository-table render. */
+let worktreeCleanupWaitingByRepo = new Map<string, number>();
 
 function numField(v: unknown): number { return Number(v ?? 0) || 0; }
 
-const USAGE_LOADING_CSS = `
-<style id="usage-loading-css">
-:root {
-  --ul-bg: var(--vscode-sideBar-background, #181825);
-  --ul-card: var(--vscode-editorWidget-background, #24273a);
-  --ul-fg: var(--vscode-editor-foreground, #cdd6f4);
-  --ul-muted: var(--vscode-descriptionForeground, #9399b2);
-  --ul-accent: var(--vscode-textLink-foreground, #89b4fa);
-  --ul-success: var(--vscode-terminal-ansiGreen, #a6e3a1);
-  --ul-border: var(--vscode-panel-border, #313244);
-  --ul-badge-bg: var(--vscode-badge-background, #313244);
-}
-#usage-loading-wrap {
-  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-  display: flex; align-items: flex-start; justify-content: center; padding: 28px 20px;
-}
-#usage-loading-card {
-  width: 100%; max-width: 680px;
-  background: var(--ul-card); border: 1px solid var(--ul-border);
-  border-radius: 16px; padding: 24px 28px;
-  box-shadow: 0 8px 32px rgba(0,0,0,0.3); color: var(--ul-fg);
-}
-#ul-header { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 4px; gap: 16px; }
-#ul-badge { font-size: 11px; font-weight: 700; letter-spacing: 0.15em; text-transform: uppercase; color: var(--ul-accent); margin-bottom: 4px; }
-#ul-title { font-size: 22px; font-weight: 700; color: var(--ul-fg); margin-bottom: 4px; }
-#ul-subtitle { font-size: 12px; color: var(--ul-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 360px; }
-#ul-right { display: flex; flex-direction: column; align-items: flex-end; gap: 6px; flex-shrink: 0; }
-#ul-pct { font-size: 32px; font-weight: 800; color: var(--ul-fg); line-height: 1; min-width: 60px; text-align: right; font-variant-numeric: tabular-nums; }
-.ul-meta-badge { font-size: 11px; padding: 3px 10px; border: 1px solid var(--ul-border); border-radius: 20px; color: var(--ul-muted); background: var(--vscode-editor-background, #1e1e2e); white-space: nowrap; }
-#ul-track { height: 6px; background: var(--ul-border); border-radius: 3px; overflow: hidden; margin: 16px 0; }
-#ul-fill { height: 100%; border-radius: 3px; background: linear-gradient(90deg, var(--ul-accent), var(--ul-success)); transition: width 0.4s ease; width: 3%; }
-#ul-fill.ul-indeterminate { width: 25%; animation: ul-shimmer 1.8s ease-in-out infinite; background: linear-gradient(90deg, transparent, var(--ul-accent), var(--ul-success), transparent); }
-@keyframes ul-shimmer { 0% { margin-left: -30%; } 100% { margin-left: 110%; } }
-#ul-steps { background: var(--ul-bg); border: 1px solid var(--ul-border); border-radius: 10px; padding: 14px 16px; }
-.ul-step { display: flex; align-items: center; gap: 10px; padding: 5px 0; color: var(--ul-muted); font-size: 13px; transition: color 0.25s; }
-.ul-step.ul-done   { color: var(--ul-success); }
-.ul-step.ul-active { color: var(--ul-accent); font-weight: 600; }
-.ul-ico { width: 18px; text-align: center; flex-shrink: 0; }
-.ul-spin { display: inline-block; animation: ul-spin 0.75s linear infinite; }
-@keyframes ul-spin { to { transform: rotate(360deg); } }
-.ul-lbl { flex: 1; }
-.ul-cnt { font-size: 11px; opacity: 0.75; font-variant-numeric: tabular-nums; }
-@keyframes ul-pop { 0% { transform: scale(0.4); opacity: 0; } 60% { transform: scale(1.3); } 100% { transform: scale(1); opacity: 1; } }
-.ul-pop { animation: ul-pop 0.3s ease both; }
-</style>`;
-
-const USAGE_LOADING_STEPS = [
-	{ id: 'ul-s-start',  label: 'Starting usage analysis' },
-	{ id: 'ul-s-tools',  label: 'Collecting runtime tools' },
-	{ id: 'ul-s-mcp',    label: 'Discovering MCP servers' },
-	{ id: 'ul-s-skills', label: 'Scanning skill directories' },
-	{ id: 'ul-s-crunch', label: 'Computing curation analysis' },
-	{ id: 'ul-s-ready',  label: 'Ready!' },
-] as const;
-
-type UsageLoadingStepId = typeof USAGE_LOADING_STEPS[number]['id'];
-
-const USAGE_STAGE_MAP: Record<string, { pct: number; stepId: UsageLoadingStepId; subtitle: string }> = {
-	start:                     { pct:  5, stepId: 'ul-s-start',  subtitle: 'Starting usage analysis…' },
-	'curation:start':          { pct: 20, stepId: 'ul-s-tools',  subtitle: 'Collecting tools and skills…' },
-	'curation:runtimeTools':   { pct: 32, stepId: 'ul-s-tools',  subtitle: 'Collected runtime tools' },
-	'curation:mcpJson':        { pct: 44, stepId: 'ul-s-mcp',    subtitle: 'Scanning MCP config files…' },
-	'curation:mcpSources':     { pct: 55, stepId: 'ul-s-mcp',    subtitle: 'Collected MCP servers' },
-	'curation:skillsScanStart':{ pct: 63, stepId: 'ul-s-skills', subtitle: 'Scanning skill directories…' },
-	'curation:skillsScanDone': { pct: 75, stepId: 'ul-s-skills', subtitle: 'Skill discovery complete' },
-	'curation:analyzing':      { pct: 85, stepId: 'ul-s-crunch', subtitle: 'Analyzing tool usage patterns…' },
-	'curation:done':           { pct: 96, stepId: 'ul-s-crunch', subtitle: 'Curation analysis complete' },
-	ready:                     { pct:100, stepId: 'ul-s-ready',  subtitle: 'Usage analysis ready' },
-	error:                     { pct:100, stepId: 'ul-s-ready',  subtitle: 'Analysis completed with errors' },
-	'curation:error':          { pct: 85, stepId: 'ul-s-crunch', subtitle: 'Curation analysis skipped' },
-};
-
 function renderUsageLoadingState(initialMessage = 'Loading usage analysis...'): void {
-	const root = document.getElementById('root');
-	if (!root) { return; }
-	_ulLoadingActive = true;
 	// The tab bar is about to be replaced, so the next layout is a fresh one: a switchTab
 	// arriving while this loading UI is up has no button to click, and only setupTabs can
 	// start that tab's fetch once the layout comes back.
 	layoutLazyTabLoadStarted = false;
-
-	const stepsHtml = USAGE_LOADING_STEPS.map((s, i) => {
-		const isFirst = i === 0;
-		const cls = isFirst ? 'ul-step ul-active' : 'ul-step';
-		const ico = isFirst ? '<span class="ul-spin">↻</span>' : '○';
-		return `<div class="${cls}" id="${s.id}"><span class="ul-ico">${ico}</span><span class="ul-lbl">${escapeHtml(s.label)}</span><span class="ul-cnt" id="${s.id}-cnt"></span></div>`;
-	}).join('');
-
-	setHtml(root, `${USAGE_LOADING_CSS}
-<div id="usage-loading-wrap">
-  <div id="usage-loading-card">
-    <div id="ul-header">
-      <div>
-        <div id="ul-badge">📊 Analyzing Usage Data</div>
-        <div id="ul-title">${escapeHtml(initialMessage)}</div>
-        <div id="ul-subtitle">Initializing…</div>
-      </div>
-      <div id="ul-right">
-        <div id="ul-pct">–</div>
-        <div style="display:flex;gap:6px;" id="ul-meta"></div>
-      </div>
-    </div>
-    <div id="ul-track"><div id="ul-fill" class="ul-indeterminate"></div></div>
-    <div id="ul-steps">${stepsHtml}</div>
-  </div>
-</div>`);
-}
-
-function _ulSetDone(id: string): void {
-	const el = document.getElementById(id);
-	if (!el) { return; }
-	el.className = 'ul-step ul-done';
-	const ico = el.querySelector('.ul-ico');
-	if (ico) { setHtml(ico, '<span class="ul-pop">✓</span>'); }
-}
-
-function _ulSetActive(id: string): void {
-	const el = document.getElementById(id);
-	if (!el) { return; }
-	el.className = 'ul-step ul-active';
-	const ico = el.querySelector('.ul-ico');
-	if (ico) { setHtml(ico, '<span class="ul-spin">↻</span>'); }
-}
-
-function _ulSetCnt(id: string, text: string): void {
-	const el = document.getElementById(`${id}-cnt`);
-	if (el) { el.textContent = text; }
-}
-
-let _ulLastStepIdx = 0;
-// True while the loading card is the active view. Once real content is
-// rendered (updateStats) this is cleared, so stray progress events from a
-// background silent recompute never re-create the loading card over content.
-let _ulLoadingActive = false;
-
-function _ulAdvanceSteps(targetIdx: number, pct: number): void {
-	for (let i = _ulLastStepIdx; i < targetIdx; i++) { _ulSetDone(USAGE_LOADING_STEPS[i].id); }
-	if (targetIdx > _ulLastStepIdx) { _ulLastStepIdx = targetIdx; }
-	if (pct < 100) { _ulSetActive(USAGE_LOADING_STEPS[targetIdx].id); }
-	else { _ulSetDone(USAGE_LOADING_STEPS[targetIdx].id); }
-}
-
-function _ulDetailCnt(details: Record<string, unknown>): string {
-	if (typeof details.count === 'number') { return `${details.count}`; }
-	if (typeof details.skills === 'number') { return `${details.skills} skills`; }
-	if (typeof details.availableTools === 'number') { return `${details.availableTools} tools`; }
-	return '';
-}
-
-// Ensures the loading card exists before applying a progress event. Returns
-// false when the event should be ignored because content has already replaced
-// the card (stray events from a background silent recompute), preventing the
-// loading card from flashing back over the rendered analysis.
-function _ulEnsureCard(): boolean {
-	const root = document.getElementById('root');
-	if (!root) { return false; }
-	if (root.querySelector('#usage-loading-card')) { return true; }
-	if (!_ulLoadingActive) { return false; }
-	renderUsageLoadingState('Building Usage Analysis');
-	_ulLastStepIdx = 0;
-	return true;
+	renderUsageLoadingCard(initialMessage);
 }
 
 function updateUsageLoadingProgress(message: any): void {
-	if (!_ulEnsureCard()) { return; }
-	const stage = typeof message?.stage === 'string' ? message.stage : '';
-	const mapped = USAGE_STAGE_MAP[stage];
-	if (!mapped) { return; }
-
-	const pct = mapped.pct;
-	const fill = document.getElementById('ul-fill');
-	if (fill) { fill.classList.remove('ul-indeterminate'); fill.style.width = `${Math.max(pct, 3)}%`; }
-	const pctEl = document.getElementById('ul-pct');
-	if (pctEl) { pctEl.textContent = pct === 100 ? '100%' : `${pct}%`; }
-	const subtitleEl = document.getElementById('ul-subtitle');
-	if (subtitleEl) { subtitleEl.textContent = mapped.subtitle; }
-
-	const targetIdx = USAGE_LOADING_STEPS.findIndex(s => s.id === mapped.stepId);
-	if (targetIdx >= 0) { _ulAdvanceSteps(targetIdx, pct); }
-
-	const details = message?.details;
-	if (details && typeof details === 'object') {
-		const cnt = _ulDetailCnt(details as Record<string, unknown>);
-		if (cnt) { _ulSetCnt(mapped.stepId, `(${cnt})`); }
-	}
+	applyUsageLoadingProgress(message, () => { layoutLazyTabLoadStarted = false; });
 }
 
 function clearLoadingTimeout(): void {
@@ -755,6 +629,8 @@ type RepoPrInfo = {
   aiDetails: RepoPrDetail[];
   userAuthoredPrs?: number;
   userMergedPrs?: number;
+  /** True when this repo's PR listing was incomplete — its counts are a lower bound. */
+  partial?: boolean;
   error?: string;
 };
 
@@ -767,6 +643,8 @@ type RepoPrStatsResult = {
   fetchedAt?: string;
   /** How often the snapshot is refreshed, so the UI can say when the next refresh is due. */
   refreshIntervalMs?: number;
+  /** True when at least one repo's listing was incomplete — the totals are lower bounds. */
+  partial?: boolean;
 };
 
 const EFFORT_DISPLAY_NAMES: Record<string, string> = {
@@ -777,7 +655,7 @@ function getEffortDisplayName(level: string): string {
 	return EFFORT_DISPLAY_NAMES[level] ?? level;
 }
 
-import { resolveGuidMcpToolName, isGuidMcpTool, resolveMcpFamilyToolName, isMcpFamilyResolvedTool, lookupKnownToolName, isKnownToolDisplayName } from '../../../../src/utils/toolUtils';
+import { resolveGuidMcpToolName, resolveMcpFamilyToolName, lookupKnownToolName, getUnknownToolNames } from '../../../../src/utils/toolUtils';
 import { preferredScrollBehavior } from '../shared/surfaceNavigation';
 
 // Tool name maps are injected by the extension host as window.__TOOL_NAMES__ and window.__AUTOMATIC_TOOLS__
@@ -803,33 +681,7 @@ function lookupMcpToolName(id: string): string {
 }
 
 function getUnknownMcpTools(stats: UsageAnalysisStats): string[] {
-	const allTools = new Set<string>();
-	
-	// Collect all MCP tools from all periods
-	Object.entries(stats.today.mcpTools.byTool).forEach(([tool]) => allTools.add(tool));
-	Object.entries(stats.last30Days.mcpTools.byTool).forEach(([tool]) => allTools.add(tool));
-	Object.entries(stats.month.mcpTools.byTool).forEach(([tool]) => allTools.add(tool));
-	Object.entries(stats.lastMonth.mcpTools.byTool).forEach(([tool]) => allTools.add(tool));
-	// Also collect MCP server names — the "By Server" tables render them through the
-	// same friendly-name lookup, so an unmapped server name (e.g. `ccd_session`)
-	// would otherwise show raw without ever being flagged as missing.
-	Object.keys(stats.today.mcpTools.byServer).forEach(server => allTools.add(server));
-	Object.keys(stats.last30Days.mcpTools.byServer).forEach(server => allTools.add(server));
-	Object.keys(stats.month.mcpTools.byServer).forEach(server => allTools.add(server));
-	Object.keys(stats.lastMonth.mcpTools.byServer).forEach(server => allTools.add(server));
-	// Also collect all general tool calls so non-MCP tools without friendly names are caught
-	Object.entries(stats.today.toolCalls.byTool).forEach(([tool]) => allTools.add(tool));
-	Object.entries(stats.last30Days.toolCalls.byTool).forEach(([tool]) => allTools.add(tool));
-	Object.entries(stats.month.toolCalls.byTool).forEach(([tool]) => allTools.add(tool));
-	Object.entries(stats.lastMonth.toolCalls.byTool).forEach(([tool]) => allTools.add(tool));
-
-	const suppressed = new Set<string>(stats.suppressedUnknownTools ?? []);
-	
-	// Filter to only unknown tools (not a key in the map, case-insensitively or canonically, and not
-	// resolvable via a known GUID/family pattern) and not suppressed. Tools resolved via
-	// isMcpFamilyResolvedTool are a recognized MCP tool under a new server-registration
-	// spelling (see issue #1760) — they shouldn't generate another "add missing name" report.
-	return Array.from(allTools).filter(tool => !(TOOL_NAME_MAP && (lookupKnownToolName(tool, TOOL_NAME_MAP) || isKnownToolDisplayName(tool, TOOL_NAME_MAP))) && !isGuidMcpTool(tool) && !isMcpFamilyResolvedTool(tool) && !suppressed.has(tool)).sort();
+	return getUnknownToolNames(stats, TOOL_NAME_MAP ?? {}, stats.suppressedUnknownTools ?? []);
 }
 
 function createMcpToolIssueUrl(unknownTools: string[], toolCallsByEditor?: { [tool: string]: { [editor: string]: number } }): string {
@@ -894,6 +746,41 @@ return `
 </div>`;
 }
 
+const AGENT_SOURCE_LABELS: Record<AgentSource, string> = { github: '.github/agents', claude: '.claude/agents', user: 'user profile', other: '' };
+
+/** One period's custom-agent list: each agent under the exact name the session log shows, busiest first. */
+function renderAgentUsageList(agentUsage: AgentUsage | undefined, title: string): string {
+	const entries = Object.entries(agentUsage?.byAgent ?? {}).sort((a, b) => b[1].requests - a[1].requests || a[0].localeCompare(b[0]));
+	const total = entries.reduce((sum, [, e]) => sum + e.requests, 0);
+	const bars = entries.length === 0
+		? `<div class="bar-label"><span>${escapeHtml(localize('usage.customAgents.none'))}</span></div>`
+		: entries.map(([name, e]) => {
+			const source = AGENT_SOURCE_LABELS[e.source];
+			const label = `⚡ ${escapeHtml(name)}${source ? ` <span style="opacity: 0.7;">(${escapeHtml(source)})</span>` : ''}`;
+			return renderModeBarItem(label, e.requests, total, 'linear-gradient(90deg, #ec4899, #f472b6)');
+		}).join('');
+	return `
+<div>
+<h4 style="color: var(--text-primary); font-size: 13px; margin-bottom: 8px;">${title}</h4>
+<div class="bar-chart">${bars}
+</div>
+</div>`;
+}
+
+/** Custom Agents section; omitted entirely when neither period used a custom agent. */
+function buildCustomAgentsSectionHtml(stats: UsageAnalysisStats): string {
+	if (!stats.today.agentUsage && !stats.last30Days.agentUsage) { return ''; }
+	return `
+			<div class="section" id="section-custom-agents">
+				<div class="section-title"><span>⚡</span><span>${escapeHtml(localize('usage.customAgents.title'))}</span></div>
+				<div class="section-subtitle">${escapeHtml(localize('usage.customAgents.subtitle'))}</div>
+				<div class="two-column">
+					${renderAgentUsageList(stats.today.agentUsage, '📅 Today')}
+					${renderAgentUsageList(stats.last30Days.agentUsage, '📊 Last 30 Days')}
+				</div>
+			</div>`;
+}
+
 // ─── Multi-model period helper ──────────────────────────────────────────────────
 
 /** Renders the top stats-grid section (avg models, switching frequency, max models). */
@@ -916,6 +803,17 @@ return `
 </div>`;
 }
 
+/** Icon and escaped label per cost tier, shared by Model Cost Usage and Multi-Model Usage so they cannot disagree. */
+function modelCostTierLabelHtml(tier: 'low' | 'medium' | 'high' | 'unknown'): string {
+	const labels = {
+		low: `💚 ${localize('usage.modelCost.tier.low')}`,
+		medium: `🔵 ${localize('usage.modelCost.tier.medium')}`,
+		high: `💸 ${localize('usage.modelCost.tier.high')}`,
+		unknown: `❓ ${localize('usage.modelCost.tier.unknown')}`,
+	};
+	return escapeHtml(labels[tier]);
+}
+
 /** Renders the "Models by Cost Level" breakdown listing model names per cost tier. */
 function _renderMultiModelCostLevelBreakdown(
 allLowCostModels: readonly string[],
@@ -927,74 +825,28 @@ return `
 <div style="min-height: 110px;">
 ${allLowCostModels.length > 0 ? `
 <div style="margin-bottom: 6px;">
-<span style="color: #4ade80;">💚 Low cost:</span>
+<span style="color: #4ade80;">${modelCostTierLabelHtml('low')}:</span>
 <span style="font-size: 11px; color: var(--text-primary);">${allLowCostModels.map(escapeHtml).join(', ')}</span>
 </div>
 ` : '<div style="margin-bottom: 6px; height: 21px;"></div>'}
 ${allMediumCostModels.length > 0 ? `
 <div style="margin-bottom: 6px;">
-<span style="color: var(--link-color);">🟡 Medium cost:</span>
+<span style="color: var(--link-color);">${modelCostTierLabelHtml('medium')}:</span>
 <span style="font-size: 11px; color: var(--text-primary);">${allMediumCostModels.map(escapeHtml).join(', ')}</span>
 </div>
 ` : '<div style="margin-bottom: 6px; height: 21px;"></div>'}
 ${allHighCostModels.length > 0 ? `
 <div style="margin-bottom: 6px;">
-<span style="color: var(--warning-fg);">💸 High cost:</span>
+<span style="color: var(--warning-fg);">${modelCostTierLabelHtml('high')}:</span>
 <span style="font-size: 11px; color: var(--text-primary);">${allHighCostModels.map(escapeHtml).join(', ')}</span>
 </div>
 ` : '<div style="margin-bottom: 6px; height: 21px;"></div>'}
 ${allUnknownModels.length > 0 ? `
 <div style="margin-bottom: 6px;">
-<span style="color: var(--text-muted);">❓ Unknown:</span>
+<span style="color: var(--text-muted);">${modelCostTierLabelHtml('unknown')}:</span>
 <span style="font-size: 11px; color: var(--text-primary);">${allUnknownModels.map(escapeHtml).join(', ')}</span>
 </div>
 ` : ''}
-</div>`;
-}
-
-/** Renders the "Request Count" breakdown by cost tier, or an empty string if there were no requests. */
-function _renderMultiModelRequestCountBreakdown(switching: ModelSwitchingAnalysis): string {
-if (switching.totalRequests <= 0) {
-return '';
-}
-return `
-<div style="padding-top: 8px; border-top: 1px solid var(--border-subtle); min-height: 85px;">
-<div style="font-size: 11px; font-weight: 600; color: var(--text-primary); margin-bottom: 4px;">Request Count:</div>
-${switching.lowCostRequests > 0 ? `
-<div style="margin-bottom: 4px; font-size: 11px;">
-<span style="color: #4ade80;">💚 Low cost: </span>
-<span style="color: var(--text-primary);">${formatNumber(switching.lowCostRequests)} (${formatPercent((switching.lowCostRequests / switching.totalRequests) * 100)})</span>
-</div>
-` : ''}
-${switching.mediumCostRequests > 0 ? `
-<div style="margin-bottom: 4px; font-size: 11px;">
-<span style="color: var(--link-color);">🟡 Medium cost: </span>
-<span style="color: var(--text-primary);">${formatNumber(switching.mediumCostRequests)} (${formatPercent((switching.mediumCostRequests / switching.totalRequests) * 100)})</span>
-</div>
-` : ''}
-${switching.highCostRequests > 0 ? `
-<div style="margin-bottom: 4px; font-size: 11px;">
-<span style="color: var(--warning-fg);">💸 High cost: </span>
-<span style="color: var(--text-primary);">${formatNumber(switching.highCostRequests)} (${formatPercent((switching.highCostRequests / switching.totalRequests) * 100)})</span>
-</div>
-` : ''}
-${switching.unknownRequests > 0 ? `
-<div style="margin-bottom: 4px; font-size: 11px;">
-<span style="color: var(--text-muted);">❓ Unknown: </span>
-<span style="color: var(--text-primary);">${formatNumber(switching.unknownRequests)} (${formatPercent((switching.unknownRequests / switching.totalRequests) * 100)})</span>
-</div>
-` : ''}
-</div>`;
-}
-
-/** Renders the mixed-cost-sessions callout line, or an empty string if there were none. */
-function _renderMultiModelMixedCostSessions(switching: ModelSwitchingAnalysis): string {
-if (switching.mixedCostSessions <= 0) {
-return '';
-}
-return `
-<div style="margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--border-subtle);">
-<span style="font-size: 11px; color: var(--link-color);">🔀 Mixed cost sessions: ${formatNumber(switching.mixedCostSessions)}</span>
 </div>`;
 }
 
@@ -1014,8 +866,6 @@ ${_renderMultiModelStatCards(switching)}
 <div style="margin-top: 12px; padding: 12px; background: var(--bg-tertiary); border: 1px solid var(--border-subtle); border-radius: 6px;">
 <div style="font-size: 12px; font-weight: 600; color: var(--text-primary); margin-bottom: 8px;">Models by Cost Level:</div>
 ${_renderMultiModelCostLevelBreakdown(allLowCostModels, allMediumCostModels, allHighCostModels, allUnknownModels)}
-${_renderMultiModelRequestCountBreakdown(switching)}
-${_renderMultiModelMixedCostSessions(switching)}
 </div>
 </div>`;
 }
@@ -1111,7 +961,7 @@ function formatCompactSessionNumber(value: number): { html: string; title: strin
 }
 
 /**
- * Whether a raw model id refers to HydraFusion.
+ * Whether a raw model id refers to Copilot Fusion.
  *
  * Ids arrive in several shapes (`hydrafusion`, `copilot/hydrafusion`, `hydra-fusion`,
  * a dated/preview suffix), so separators are stripped and the name must start the id —
@@ -1202,14 +1052,14 @@ let enabledSessionColumns: Set<SessionColumnId> = new Set(ALL_SESSION_COLUMN_IDS
 /** Columns a navigation preset turned on; re-applied whenever saved settings replace the set above. */
 const presetForcedColumns = new Set<SessionColumnId>();
 
-// --- Recent Sessions pill filters (Editor / Model / Model vendor / HydraFusion) ---
+// --- Recent Sessions pill filters (Editor / Model / Model vendor / Copilot Fusion) ---
 /** Active editor pill filters. Empty set means "no filter" (show all editors). */
-let sessionFilterEditors: Set<string> = new Set();
+const sessionFilterEditors: Set<string> = new Set();
 /** Active model-vendor pill filters (e.g. "Anthropic", "OpenAI"). Empty set means "no filter". */
-let sessionFilterVendors: Set<string> = new Set();
+const sessionFilterVendors: Set<string> = new Set();
 /** Active model pill filters. Empty set means "no filter". */
-let sessionFilterModels: Set<string> = new Set();
-/** Quick toggle: when true, only show sessions that used a HydraFusion model. */
+const sessionFilterModels: Set<string> = new Set();
+/** Quick toggle: when true, only show sessions that used a Copilot Fusion model. */
 let sessionFilterHydraFusionOnly = false;
 /** Quick toggle: when true, only show sessions that nearly filled their context window. */
 let sessionFilterNearContextLimitOnly = false;
@@ -1275,7 +1125,7 @@ function computeSessionFilterOptions(sessions: TodaySessionSummary[]): {
 	};
 }
 
-/** Renders the pill filter bar above the Recent Sessions table (Editor / Vendor / Model / HydraFusion). */
+/** Renders the pill filter bar above the Recent Sessions table (Editor / Vendor / Model / Copilot Fusion). */
 function buildSessionFilterBarHtml(sessions: TodaySessionSummary[]): string {
 	if (!sessions || sessions.length === 0) { return ''; }
 	const opts = computeSessionFilterOptions(sessions);
@@ -1292,7 +1142,7 @@ function buildSessionFilterBarHtml(sessions: TodaySessionSummary[]): string {
 	}
 	if (opts.hydraFusionCount > 0) {
 		const isActive = sessionFilterHydraFusionOnly;
-		groups.push(`<div class="session-filter-group"><button type="button" class="session-filter-pill session-filter-pill-hydrafusion${isActive ? ' active' : ''}" data-filter-type="hydrafusion" data-filter-value="true" aria-pressed="${isActive}" title="Show only sessions that used HydraFusion">⚡ HydraFusion <span class="session-filter-pill-count">${opts.hydraFusionCount}</span></button></div>`);
+		groups.push(`<div class="session-filter-group"><button type="button" class="session-filter-pill session-filter-pill-hydrafusion${isActive ? ' active' : ''}" data-filter-type="hydrafusion" data-filter-value="true" aria-pressed="${isActive}" title="${escapeHtml(localize('usage.sessions.fusion.filterTooltip'))}">⚡ ${escapeHtml(localize('usage.sessions.fusion.label'))} <span class="session-filter-pill-count">${opts.hydraFusionCount}</span></button></div>`);
 	}
 	groups.push(buildFilterPillGroupHtml('Editor', 'editor', opts.editors, sessionFilterEditors));
 	groups.push(buildFilterPillGroupHtml('Vendor', 'vendor', opts.vendors, sessionFilterVendors));
@@ -1355,7 +1205,7 @@ function toSessionDataColumn(col: SessionColumnDef): DataTableColumn<TodaySessio
 function sessionTitleCellHtml(s: TodaySessionSummary): string {
 	const title = escapeHtml(s.title || 'Untitled session');
 	const hydraFusionBadge = s.models.some(isHydraFusionModel)
-		? '<span class="hydrafusion-session-badge" title="This session used HydraFusion">HydraFusion</span>'
+		? `<span class="hydrafusion-session-badge" title="${escapeHtml(localize('usage.sessions.fusion.badgeTooltip'))}">${escapeHtml(localize('usage.sessions.fusion.label'))}</span>`
 		: '';
 	const pathSub = s.workspacePath || s.workspace;
 	const subtitleHtml = pathSub
@@ -1559,6 +1409,25 @@ function sanitizeModeUsage(mode: any): ModeUsage {
 	};
 }
 
+const AGENT_SOURCES: readonly AgentSource[] = ['github', 'claude', 'user', 'other'];
+
+/** Rebuild a period's custom-agent usage from an untrusted payload: numbers coerced, sources whitelisted. */
+function sanitizeAgentUsage(raw: unknown): AgentUsage | undefined {
+	const byAgent = (raw as { byAgent?: unknown } | null | undefined)?.byAgent;
+	if (!byAgent || typeof byAgent !== 'object') { return undefined; }
+	const clean: AgentUsage['byAgent'] = {};
+	for (const [name, value] of Object.entries(byAgent)) {
+		const entry = value as { sessions?: unknown; requests?: unknown; source?: unknown } | null;
+		if (name === '__proto__' || !entry || typeof entry !== 'object') { continue; }
+		clean[name] = {
+			sessions: coerceNumber(entry.sessions),
+			requests: coerceNumber(entry.requests),
+			source: AGENT_SOURCES.find(s => s === entry.source) ?? 'other',
+		};
+	}
+	return Object.keys(clean).length > 0 ? { byAgent: clean } : undefined;
+}
+
 function sanitizeContextRefs(refs: any): ContextReferenceUsage {
 	const r = (refs && typeof refs === 'object') ? refs : {};
 	return {
@@ -1596,6 +1465,7 @@ function sanitizePeriod(period: any): UsageAnalysisPeriod {
 	return {
 		sessions: coerceNumber(p.sessions),
 		modeUsage: sanitizeModeUsage(p.modeUsage),
+		agentUsage: sanitizeAgentUsage(p.agentUsage),
 		contextReferences: sanitizeContextRefs(p.contextReferences),
 		toolCalls: {
 			total: coerceNumber(toolCalls.total),
@@ -1779,6 +1649,7 @@ function sanitizeOptionalReports(sanitized: UsageAnalysisStats, raw: any): void 
 	}
 	sanitized.repeatedTasks = sanitizeRepeatedTaskReport(raw.repeatedTasks);
 	sanitized.autoCompactionsLast7Days = sanitizeAutomaticCompactions(raw?.autoCompactionsLast7Days);
+	sanitized.hydraFusion = sanitizeRouterPayload(raw?.hydraFusion);
 }
 
 function applySessionSummaries(sanitized: UsageAnalysisStats, raw: any): void {
@@ -1825,6 +1696,31 @@ function applyMemoryFilesAnalysis(sanitized: UsageAnalysisStats, raw: any): void
 	}
 }
 
+// Validated pass-through for missedPotential (array of objects)
+function _applyMissedPotential(sanitized: UsageAnalysisStats, raw: { missedPotential?: unknown }): void {
+	if (Array.isArray(raw.missedPotential)) {
+		sanitized.missedPotential = raw.missedPotential.filter(
+			(w: unknown) => !!w && typeof w === 'object' && typeof (w as { workspacePath?: unknown }).workspacePath === 'string'
+		) as MissedPotentialWorkspace[];
+	}
+}
+
+// Pass through curationAnalysis (already structured server-side).
+// Normalize required array/object fields so rendering paths don't throw on partial payloads.
+function _applyCurationAnalysis(sanitized: UsageAnalysisStats, raw: { curationAnalysis?: unknown }): void {
+	const curationAnalysis = _sanitizeCurationAnalysis(raw.curationAnalysis);
+	if (curationAnalysis) {
+		sanitized.curationAnalysis = curationAnalysis;
+		traceCuration('sanitizeStats.curation.present', {
+			availableTools: curationAnalysis.availableTools.length,
+			unusedTools: curationAnalysis.unusedTools.length,
+			unusedServers: curationAnalysis.underusedMcpServers.filter(s => s && s.usedToolCount === 0).length,
+		});
+	} else {
+		traceCurationOnce('sanitize-no-curation', 'sanitizeStats.curation.missing');
+	}
+}
+
 function sanitizeStats(raw: any): UsageAnalysisStats | null {
 	if (!raw || typeof raw !== 'object') {
 		traceCurationOnce('sanitize-invalid-root', 'sanitizeStats.invalidRoot');
@@ -1847,6 +1743,7 @@ function sanitizeStats(raw: any): UsageAnalysisStats | null {
 			suppressedUnknownTools: Array.isArray(raw.suppressedUnknownTools)
 				? raw.suppressedUnknownTools.filter((t: unknown) => typeof t === 'string') as string[]
 				: undefined,
+			toolFamilies: sanitizeToolFamilies(raw.toolFamilies),
 			toolCallsByEditor: sanitizeToolCallsByEditor(raw.toolCallsByEditor),
 		};
 
@@ -1858,12 +1755,7 @@ function sanitizeStats(raw: any): UsageAnalysisStats | null {
 			sanitized.customizationMatrix = safeMatrix as WorkspaceCustomizationMatrix;
 		}
 
-		// Validated pass-through for missedPotential (array of objects)
-		if (Array.isArray(raw.missedPotential)) {
-			sanitized.missedPotential = raw.missedPotential.filter(
-				(w: any) => w && typeof w === 'object' && typeof w.workspacePath === 'string'
-			) as MissedPotentialWorkspace[];
-		}
+		_applyMissedPotential(sanitized, raw);
 
 		applySessionSummaries(sanitized, raw);
 
@@ -1874,27 +1766,14 @@ function sanitizeStats(raw: any): UsageAnalysisStats | null {
 
 		sanitizeOptionalReports(sanitized, raw);
 
-		// Pass through curationAnalysis (already structured server-side).
-		// Normalize required array/object fields so rendering paths don't throw on partial payloads.
-		const curationAnalysis = _sanitizeCurationAnalysis(raw.curationAnalysis);
-		if (curationAnalysis) {
-			sanitized.curationAnalysis = curationAnalysis;
-			traceCuration('sanitizeStats.curation.present', {
-				availableTools: curationAnalysis.availableTools.length,
-				unusedTools: curationAnalysis.unusedTools.length,
-				unusedServers: curationAnalysis.underusedMcpServers.filter(s => s && s.usedToolCount === 0).length,
-			});
-		} else {
-			traceCurationOnce('sanitize-no-curation', 'sanitizeStats.curation.missing');
-		}
+		_applyCurationAnalysis(sanitized, raw);
 
-		// Pass through the memory-files hygiene analysis (compact MemoryFilesAnalysisView
-		// rollup: counts/rollup scalars only — no paths and no per-file metadata).
+		// Pass through the memory-files hygiene analysis (compact rollup: counts/scalars only, no paths).
 		applyMemoryFilesAnalysis(sanitized, raw);
 
 		// Pass through the Copilot API quota balance and current-month billing costs.
 		// Without this, periodic updateStats refreshes rebuild the stats object without
-		// these fields, so the "Copilot Billing Coverage" section disappears after the
+		// these fields, so the "AI Billing Coverage" section disappears after the
 		// first refresh even though the extension still has the data.
 		applyBillingFields(sanitized, raw);
 
@@ -1963,7 +1842,8 @@ function startWorktreeScan(): void {
  * `repoLabel` to scope the cleanup to one repository's row; omit it for the global card.
  */
 function startWorktreeCleanup(repoLabel?: string): void {
-	if (worktreeCleanupInProgress || worktreeCleanupConfirmPending || worktreeScanInProgress) { return; }
+	// While a run is in flight this queues the repository behind it (the extension appends to its loop).
+	if (worktreeCleanupConfirmPending || worktreeScanInProgress) { return; }
 	const targets = getCleanupCandidates(repoLabel);
 	if (targets.length === 0) { return; }
 	worktreeCleanupConfirmPending = true;
@@ -2032,6 +1912,13 @@ function _handleWorktreeRowLinkClick(event: MouseEvent, target: HTMLElement): bo
 		event.preventDefault();
 		const p = decodeURIComponent(openEditorBtn.getAttribute("data-path") || "");
 		if (p) { vscode.postMessage({ command: "openWorktreeInEditor", path: p }); }
+		return true;
+	}
+	const copyPromptBtn = target.closest(".worktree-copy-prompt-btn") as HTMLElement | null;
+	if (copyPromptBtn) {
+		event.preventDefault();
+		const prompt = buildWorktreeDiffPrompt(decodeURIComponent(copyPromptBtn.getAttribute("data-branch") || ""));
+		copyWorktreePrompt(copyPromptBtn, prompt);
 		return true;
 	}
 	const revealLink = target.closest(".worktree-reveal-link, .worktree-reveal-btn") as HTMLElement | null;
@@ -2193,6 +2080,8 @@ function handleWorktreeDeleted(message: any): void {
 	if (!targetPath) { return; }
 	const idx = worktreeResults.findIndex((w) => w.path === targetPath);
 	if (idx === -1) { return; }
+	const freed = knownBytes(worktreeResults[idx]);
+	if (freed > 0) { worktreeDeletedBytes.set(targetPath, freed); }
 	worktreeResults.splice(idx, 1);
 	updateWorktreeResults();
 }
@@ -2203,12 +2092,42 @@ function handleCleanupDeclined(): void {
 	updateWorktreeResults();
 }
 
+/** Normalizes a worktree list from the extension; entries without a path are dropped. */
+function sanitizeCleanupTargets(raw: unknown): WorktreeCleanupTarget[] {
+	if (!Array.isArray(raw)) { return []; }
+	return raw
+		.filter((t) => t && typeof t.path === "string" && t.path)
+		.map((t) => ({ path: String(t.path), branch: String(t.branch ?? "?"), repoLabel: String(t.repoLabel ?? "") }));
+}
+
+/** The extension appended another request to the running cleanup (the user queued more while it ran). */
+function handleCleanupQueued(message: Record<string, unknown>): void {
+	worktreeCleanupConfirmPending = false;
+	worktreeCleanupQueue.push(...sanitizeCleanupTargets(message.added));
+	worktreeCleanupStatus = { ...worktreeCleanupStatus, total: numField(message.total) };
+	updateWorktreeResults();
+}
+
+/** The extension began deleting this worktree; show it as the current one. */
+function handleCleanupWorktreeStarted(message: Record<string, unknown>): void {
+	worktreeCleanupCurrent = sanitizeCleanupTargets([message])[0] ?? null;
+	updateWorktreeResults();
+}
+
+/** Whether the running cleanup already owns this worktree (processed, current or waiting). */
+function isWorktreeInCleanupQueue(p: string): boolean {
+	return worktreeCleanupInProgress && worktreeCleanupQueue.some((t) => t.path === p);
+}
+
 function handleCleanupStarted(message: any): void {
 	worktreeCleanupConfirmPending = false;
 	worktreeCleanupInProgress = true;
 	worktreeCleanupStatus = { processed: 0, total: numField(message.total) };
+	worktreeCleanupQueue = sanitizeCleanupTargets(message.worktrees);
+	worktreeCleanupCurrent = null;
 	worktreeCleanupLog = [];
 	worktreeRetryState.clear();
+	worktreeDeletedBytes.clear();
 	updateWorktreeResults();
 }
 
@@ -2278,12 +2197,16 @@ function handleWorktreeDeleteResult(message: any): void {
 
 function handleCleanupComplete(): void {
 	worktreeCleanupInProgress = false;
+	worktreeCleanupCurrent = null;
+	worktreeCleanupQueue = [];
 	updateWorktreeResults();
 }
 
 function handleCleanupCancelled(): void {
 	worktreeCleanupInProgress = false;
 	worktreeCleanupConfirmPending = false;
+	worktreeCleanupCurrent = null;
+	worktreeCleanupQueue = [];
 	updateWorktreeResults();
 }
 
@@ -2359,6 +2282,8 @@ const _worktreeMessageHandlers: Record<string, (message: any) => void> = {
 	worktreeBackgroundResults: handleWorktreeBackgroundResults,
 	cleanupDeclined: () => handleCleanupDeclined(),
 	cleanupStarted: handleCleanupStarted,
+	cleanupQueued: handleCleanupQueued,
+	cleanupWorktreeStarted: handleCleanupWorktreeStarted,
 	cleanupWorktreeResult: handleCleanupWorktreeResult,
 	cleanupComplete: () => handleCleanupComplete(),
 	cleanupCancelled: () => handleCleanupCancelled(),
@@ -2379,6 +2304,31 @@ function reportTabOpened(tab: string): void {
 	// lastAnnouncedTab in step without having to remember to.
 	lastAnnouncedTab = tab;
 	vscode.postMessage({ command: 'viewTabOpened', view: 'usage', tab });
+}
+
+/**
+ * Wire the freshness banners' **Refresh now** button. Delegated from `document` because both
+ * banners are re-rendered from scratch on every snapshot update, which would drop a listener bound
+ * to the button itself. The host applies its own cooldown and cross-window lock, so a click is a
+ * request to revalidate, not a guarantee of an immediate API call.
+ */
+let githubActivityRefreshWired = false;
+
+function wireGitHubActivityRefresh(): void {
+	// renderLayout() runs again on every stats update, so without this guard each rerender would
+	// add another document-level listener and one click would post N identical messages.
+	if (githubActivityRefreshWired) { return; }
+	githubActivityRefreshWired = true;
+	document.addEventListener('click', (event) => {
+		// `event.target` is only guaranteed to be an EventTarget — a non-Element target has no
+		// closest(), so calling it unguarded would throw instead of ignoring the click.
+		const target = event.target;
+		if (!(target instanceof Element)) { return; }
+		if (!target.closest(`[data-action="${REFRESH_GITHUB_ACTIVITY_ACTION}"]`)) { return; }
+		// A literal, not the REFRESH_GITHUB_ACTIVITY_COMMAND constant: the desktop contract check can only
+		// see the commands a view sends when the name is written out at the call site.
+		vscode.postMessage({ command: 'refreshGitHubActivity' });
+	});
 }
 
 /**
@@ -2538,6 +2488,7 @@ function sanitizeRepoPrStatsData(input: unknown): RepoPrStatsResult {
 		error: typeof src.error === 'string' ? escapeHtml(src.error) : undefined,
 		fetchedAt: typeof src.fetchedAt === 'string' ? src.fetchedAt : '',
 		refreshIntervalMs: toSafeNumber(src.refreshIntervalMs),
+		partial: Boolean(src.partial),
 		repos: repos.map((repo) => {
 			const r = (repo && typeof repo === 'object') ? (repo as Record<string, unknown>) : {};
 			const aiDetails = Array.isArray(r.aiDetails) ? r.aiDetails : [];
@@ -2551,6 +2502,7 @@ function sanitizeRepoPrStatsData(input: unknown): RepoPrStatsResult {
 				aiReviewRequestedPrs: toSafeNumber(r.aiReviewRequestedPrs),
 				userAuthoredPrs: toSafeNumber(r.userAuthoredPrs),
 				userMergedPrs: toSafeNumber(r.userMergedPrs),
+				partial: Boolean(r.partial),
 				aiDetails: aiDetails.map((d) => {
 					const detail = (d && typeof d === 'object') ? (d as Record<string, unknown>) : {};
 					const validAiTypes = ['copilot', 'claude', 'openai', 'other-ai'] as const;
@@ -2587,11 +2539,20 @@ const openRepoPrDetails = new Set<string>();
 
 /** Repository cell: the repo link plus its collapsible AI PR detail list, or the fetch error. */
 function repoPrRepositoryCellHtml(r: RepoPrInfo): string {
+	// r.error is already HTML-escaped by sanitizeRepoPrStatsData (like the agent rows' error), so it is
+	// rendered as-is: escaping it again would turn `&` into `&amp;amp;` on screen.
 	const repoLink = `<a href="${escapeHtml(r.repoUrl)}" target="_blank" rel="noopener noreferrer" style="color:var(--link-color); font-family:'Courier New',monospace; font-size:12px;">${escapeHtml(r.owner)}/${escapeHtml(r.repo)}</a>`;
-	if (r.error) {
-		return `${repoLink}<div style="color:var(--text-secondary); font-style:italic; font-size:12px;">${escapeHtml(r.error)}</div>`;
+	// Only take the error-only form when the listing produced nothing. A listing that got some pages
+	// and then failed keeps those PRs on purpose, and the freshness banner is already telling the
+	// user the figures are a lower bound — blanking the counts here would contradict it, and would
+	// throw away the one piece of information the failed pass did manage to collect.
+	if (shouldRenderErrorOnlyRow(r.error, r.totalPrs)) {
+		return `${repoLink}<div style="color:var(--text-secondary); font-style:italic; font-size:12px;">${r.error ?? ''}</div>`;
 	}
-	if (r.aiDetails.length === 0) { return repoLink; }
+	const errorNote = r.error
+		? `<div style="margin-top:2px; color:var(--text-secondary); font-style:italic; font-size:11px;">${r.error}</div>`
+		: '';
+	if (r.aiDetails.length === 0) { return `${repoLink}${errorNote}`; }
 	const items = r.aiDetails.map(d => {
 		const ccrButton = (d.role === 'reviewer-requested' && d.aiType === 'copilot')
 			? renderCcrCheckButtonHtml(r.owner, r.repo, d.number)
@@ -2600,22 +2561,27 @@ function repoPrRepositoryCellHtml(r: RepoPrInfo): string {
 		return `<li><a href="${escapeHtml(d.url)}" target="_blank" rel="noopener noreferrer" style="color:var(--link-color);">#${d.number} ${escapeHtml(d.title)}</a> — ${AI_PR_LABEL[d.aiType] ?? escapeHtml(String(d.aiType))} (${escapeHtml(roleLabel)})${ccrButton}</li>`;
 	}).join('');
 	const key = `${r.owner}/${r.repo}`;
-	return `${repoLink}
+	return `${repoLink}${errorNote}
 		<details data-repo-pr-details="${escapeHtml(key)}" style="margin-top:4px; font-size:11px;"${openRepoPrDetails.has(key) ? ' open' : ''}>
 			<summary style="cursor:pointer; color:var(--text-secondary);">Show ${r.aiDetails.length} detail(s)</summary>
 			<ul style="margin:4px 0 0 16px; padding:0; list-style:disc;">${items}</ul>
 		</details>`;
 }
 
-/** A centred count column; error rows have no counts, so they render a dash and sort last. */
+/**
+ * A centred count column; rows that produced no counts at all render a dash and sort last.
+ * `errorOnly` says which rows those are: a row with an error but some counts (a listing that
+ * collected pages and then failed) keeps its counts, since the banner already marks them a lower bound.
+ */
 function githubCountColumn<Row extends { error?: string }>(
 	id: string, label: string, tip: string | undefined, value: (row: Row) => number, cell: (row: Row) => string,
+	errorOnly: (row: Row) => boolean,
 ): DataTableColumn<Row> {
 	return {
 		id, label, align: 'center', firstSortDirection: 'desc',
 		headerHtml: tip ? `<span title="${escapeHtml(tip)}">${escapeHtml(label)}</span>` : undefined,
-		sortValue: row => row.error ? null : value(row),
-		render: row => row.error ? '—' : { html: cell(row) },
+		sortValue: row => errorOnly(row) ? null : value(row),
+		render: row => errorOnly(row) ? '—' : { html: cell(row) },
 	};
 }
 
@@ -2623,6 +2589,8 @@ const boldCount = (value: number): string => value > 0 ? `<span style="font-weig
 
 /** No initialSort: repositories keep the order the host lists them in. */
 function renderRepoPrTable(repos: RepoPrInfo[]): string {
+	const col = (id: string, label: string, tip: string | undefined, value: (r: RepoPrInfo) => number, cell: (r: RepoPrInfo) => string) =>
+		githubCountColumn<RepoPrInfo>(id, label, tip, value, cell, r => shouldRenderErrorOnlyRow(r.error, r.totalPrs));
 	return renderDataTable<RepoPrInfo>({
 		tableId: 'repo-prs',
 		ariaLabel: 'AI Activity in Repository PRs',
@@ -2630,52 +2598,40 @@ function renderRepoPrTable(repos: RepoPrInfo[]): string {
 		onRender: replayCcrActivityResults,
 		columns: [
 			{ id: 'repo', label: '📂 Repository', sortValue: r => `${r.owner}/${r.repo}`, render: r => ({ html: repoPrRepositoryCellHtml(r) }) },
-			githubCountColumn<RepoPrInfo>('prs', 'PRs', undefined, r => r.totalPrs, r => `<span style="font-weight:600;">${r.totalPrs}</span>`),
-			githubCountColumn<RepoPrInfo>('yours', '🚢 Yours (merged / opened)', 'PRs you opened yourself, shown as merged / opened. Work driven by a local AI assistant lands here, not under Cloud Agent Authored.',
+			col('prs', 'PRs', undefined, r => r.totalPrs, r => `<span style="font-weight:600;">${r.totalPrs}</span>`),
+			col('yours', '🚢 Yours (merged / opened)', 'PRs you opened yourself, shown as merged / opened. Work driven by a local AI assistant lands here, not under Cloud Agent Authored.',
 				r => r.userAuthoredPrs ?? 0,
 				r => (r.userAuthoredPrs ?? 0) > 0 ? `<span style="font-weight:600;">${r.userMergedPrs ?? 0} / ${r.userAuthoredPrs}</span>` : '0'),
-			githubCountColumn<RepoPrInfo>('aiAuthored', '🤖 Cloud Agent Authored', 'PRs where the PR author\'s GitHub login matches a known AI agent (e.g. copilot-swe-agent, claude-code-action, openai-code-agent)',
+			col('aiAuthored', '🤖 Cloud Agent Authored', 'PRs where the PR author\'s GitHub login matches a known AI agent (e.g. copilot-swe-agent, claude-code-action, openai-code-agent)',
 				r => r.aiAuthoredPrs, r => boldCount(r.aiAuthoredPrs)),
-			githubCountColumn<RepoPrInfo>('aiReview', '👁 Copilot Review Agent requested†', 'Open PRs where an AI agent was listed as a requested reviewer',
+			col('aiReview', '👁 Copilot Review Agent requested†', 'Open PRs where an AI agent was listed as a requested reviewer',
 				r => r.aiReviewRequestedPrs, r => boldCount(r.aiReviewRequestedPrs)),
 		],
 	});
 }
 
-/**
- * Freshness line for the snapshot. The data is fetched at most once an hour, by whichever VS Code
- * window holds the repo-PRs lock, so the panel always says how old what it shows is.
- */
+/** Freshness line for the Repository PRs snapshot. */
 function repoPrSnapshotFreshnessHtml(data: RepoPrStatsResult): string {
-  const box = 'margin-bottom:12px; padding:8px 10px; background:var(--bg-tertiary); border:1px solid var(--border-color); border-radius:6px; font-size:11px; color:var(--text-secondary);';
-  if (!data.fetchedAt) {
-    return `<div style="${box}">🕒 <strong>Not fetched yet.</strong> The snapshot is refreshed hourly by the main VS Code window — it will appear here once that first refresh completes.</div>`;
-  }
-  const fetchedMs = Date.parse(data.fetchedAt);
-  const nextRefresh = Number.isFinite(fetchedMs) && data.refreshIntervalMs
-    ? new Date(fetchedMs + data.refreshIntervalMs).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-    : 'unknown';
-  return `<div style="${box}">
-    🕒 Updated <strong>${escapeHtml(getTimeSince(data.fetchedAt))}</strong> · next refresh after ${escapeHtml(nextRefresh)}.
-    Cached and refreshed at most once an hour, by a single VS Code window, to keep GitHub API usage low.
-  </div>`;
+  return snapshotFreshnessHtml(data, { partialNoteKey: REPO_PR_PARTIAL_NOTE_KEY });
 }
 
 function renderReposPrContent(data: RepoPrStatsResult): string {
 	const sinceDate = escapeHtml(new Date(data.since).toLocaleDateString());
 	if (data.error) {
-		return `
+		// Keep the freshness banner here too: it carries the Refresh now action, and the error state
+		// is exactly when a user wants to retry without hunting for another way to trigger one.
+		return `${repoPrSnapshotFreshnessHtml(data)}
 			<div style="margin-top:12px; padding:12px; background:var(--bg-tertiary); border:1px solid var(--border-color); border-radius:6px; font-size:12px; color:var(--text-secondary);">
 				<strong>⚠️ Failed to load repository PR activity</strong><br/>
 				${data.error}<br/>
-				Switch to another tab and back to retry — details are in the extension Output channel.
+				${escapeHtml(localize('usage.githubActivity.retryHint'))}
 			</div>`;
 	}
 	if (!data.authenticated) {
 		return `
 			<div style="margin-top:12px; padding:12px; background:var(--bg-tertiary); border:1px solid var(--border-color); border-radius:6px; font-size:12px; color:var(--text-secondary);">
 				<strong>🔒 GitHub authentication required</strong><br/>
-				Sign in with GitHub (via the Diagnostics tab) to see AI PR activity across your repositories.
+				${escapeHtml(localize('usage.repos.signInHint'))}
 			</div>`;
 	}
 	if (data.repos.length === 0) {
@@ -2734,8 +2690,29 @@ function agentRepoLabelHtml(r: AgentRepoSummary): string {
   return `${link}${accountOnly}`;
 }
 
+/**
+ * The account-wide listing's own status line.
+ *
+ * Two distinct outcomes: a listing that produced *nothing* is unavailable, while one that
+ * collected some pages and then failed is available but incomplete — `accountTasksError` is set in
+ * both cases. Reporting only the first would reduce a partial account listing to the generic
+ * lower-bound note, leaving the user with no idea that tasks outside their workspace repositories
+ * were the part that went missing.
+ */
+function accountTasksNoteHtml(data: AgentSessionsResult): string {
+	if (!data.accountTasksAvailable) {
+		const reason = data.accountTasksError || localize('usage.githubActivity.accountTasksUnknownReason');
+		return `<strong>${escapeHtml(localizeFormat('usage.githubActivity.accountTasksUnavailable', reason))}</strong>`;
+	}
+	if (!data.accountTasksError) { return ''; }
+	return escapeHtml(localizeFormat('usage.githubActivity.accountTasksIncomplete', data.accountTasksError));
+}
+
 /** No initialSort: repositories keep the order the host lists them in. */
 function renderAgentSessionsTable(repos: AgentRepoSummary[]): string {
+	const errorOnly = (r: AgentRepoSummary): boolean => shouldRenderErrorOnlyRow(r.error, r.totalTasks + r.totalSessions);
+	const col = (id: string, label: string, tip: string | undefined, value: (r: AgentRepoSummary) => number, cell: (r: AgentRepoSummary) => string) =>
+		githubCountColumn<AgentRepoSummary>(id, label, tip, value, cell, errorOnly);
 	return renderDataTable<AgentRepoSummary>({
 		tableId: 'agent-sessions',
 		ariaLabel: 'Copilot Cloud Agent Sessions',
@@ -2745,20 +2722,29 @@ function renderAgentSessionsTable(repos: AgentRepoSummary[]): string {
 				id: 'repo', label: '📂 Repository', sortValue: r => r.unassigned ? null : `${r.owner}/${r.repo}`,
 				// r.owner, r.repo, r.repoUrl and r.error are pre-sanitized by sanitizeAgentSessionsData
 				render: r => {
-					if (r.error) {
+					// Error-only row only when the listing produced nothing. A listing that collected some
+					// pages and then failed keeps those tasks deliberately, and the banner already calls
+					// the figures a lower bound — blanking them here would discard what the pass did collect.
+					if (errorOnly(r)) {
 						return { html: `${agentRepoLabelHtml(r)}<div style="color:var(--text-secondary); font-style:italic; font-size:12px;">${r.error}</div>` };
 					}
-					const partialNote = r.partial
-						? ` <span title="Showing ${r.tasksScanned} of ${r.tasksTotal} tasks — capped to limit API usage" style="color:var(--text-muted); font-size:10px;">(${r.tasksScanned}/${r.tasksTotal} tasks scanned)</span>`
+					const errorNote = r.error
+						? `<div style="margin-top:2px; color:var(--text-secondary); font-style:italic; font-size:11px;">${r.error}</div>`
 						: '';
-					return { html: `${agentRepoLabelHtml(r)}${partialNote}` };
+					// `partial` covers three different shortfalls — the detail budget, a detail call that
+					// failed, and a listing that did not enumerate fully — so the tooltip states the
+					// shortfall rather than naming the budget, which was only ever one of the three.
+					const partialNote = r.partial
+						? ` <span title="${escapeHtml(localizeFormat('usage.githubActivity.tasksScannedTooltip', String(r.tasksScanned), String(r.tasksTotal)))}" style="color:var(--text-muted); font-size:10px;">${escapeHtml(localizeFormat('usage.githubActivity.tasksScannedLabel', String(r.tasksScanned), String(r.tasksTotal)))}</span>`
+						: '';
+					return { html: `${agentRepoLabelHtml(r)}${partialNote}${errorNote}` };
 				},
 			},
-			githubCountColumn<AgentRepoSummary>('tasks', 'Tasks', 'Number of Copilot cloud agent tasks (each task = one user prompt to the agent)',
+			col('tasks', 'Tasks', 'Number of Copilot cloud agent tasks (each task = one user prompt to the agent)',
 				r => r.totalTasks, r => `<span style="font-weight:600;">${r.totalTasks}</span>`),
-			githubCountColumn<AgentRepoSummary>('sessions', 'Sessions', 'Number of agent sessions (each session = one autonomous coding run)',
+			col('sessions', 'Sessions', 'Number of agent sessions (each session = one autonomous coding run)',
 				r => r.totalSessions, r => `<span style="font-weight:600;">${r.totalSessions}</span>`),
-			githubCountColumn<AgentRepoSummary>('credits', 'AI Credits', 'AI credits consumed (1 credit = $0.01). Only available when the API reports usage data.',
+			col('credits', 'AI Credits', 'AI credits consumed (1 credit = $0.01). Only available when the API reports usage data.',
 				r => r.totalCredits > 0 ? r.totalCredits : r.totalPremiumRequests,
 				r => r.totalCredits > 0
 					? r.totalCredits.toFixed(1)
@@ -2767,23 +2753,9 @@ function renderAgentSessionsTable(repos: AgentRepoSummary[]): string {
 	});
 }
 
-/**
- * Freshness line for the snapshot. The data is fetched at most once an hour, by whichever VS Code
- * window holds the agent-tasks lock, so the panel always says how old what it shows is.
- */
+/** Freshness line for the Cloud Agent snapshot. */
 function agentSnapshotFreshnessHtml(data: AgentSessionsResult): string {
-  const box = 'margin-bottom:12px; padding:8px 10px; background:var(--bg-tertiary); border:1px solid var(--border-color); border-radius:6px; font-size:11px; color:var(--text-secondary);';
-  if (!data.fetchedAt) {
-    return `<div style="${box}">🕒 <strong>Not fetched yet.</strong> The snapshot is refreshed hourly by the main VS Code window — it will appear here once that first refresh completes.</div>`;
-  }
-  const fetchedMs = Date.parse(data.fetchedAt);
-  const nextRefresh = Number.isFinite(fetchedMs)
-    ? new Date(fetchedMs + data.refreshIntervalMs).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-    : 'unknown';
-  return `<div style="${box}">
-    🕒 Updated <strong>${escapeHtml(getTimeSince(data.fetchedAt))}</strong> · next refresh after ${escapeHtml(nextRefresh)}.
-    Cached and refreshed at most once an hour, by a single VS Code window, to keep GitHub API usage low.
-  </div>`;
+  return snapshotFreshnessHtml(data, { partialNoteKey: AGENT_SESSIONS_PARTIAL_NOTE_KEY });
 }
 
 function renderAgentSessionsContent(data: AgentSessionsResult): string {
@@ -2791,7 +2763,7 @@ function renderAgentSessionsContent(data: AgentSessionsResult): string {
 		return `
 			<div style="margin-top:12px; padding:12px; background:var(--bg-tertiary); border:1px solid var(--border-color); border-radius:6px; font-size:12px; color:var(--text-secondary);">
 				<strong>🔒 GitHub authentication required</strong><br/>
-				Sign in with GitHub (via the Diagnostics tab) to see Copilot cloud agent session data.
+				${escapeHtml(localize('usage.agent.signInHint'))}
 			</div>`;
 	}
 	if (data.repos.length === 0) {
@@ -2803,17 +2775,17 @@ function renderAgentSessionsContent(data: AgentSessionsResult): string {
 
 	const sinceDate = new Date(data.since).toLocaleDateString();
 
+	// An errored repo can still carry the tasks it collected before the failure, so its totals are
+	// summed like any other. They are a lower bound, which is exactly what the banner says.
 	const summaryTotals = data.repos.reduce((acc, r) => {
-		if (!r.error) {
-			acc.tasks += r.totalTasks;
-			acc.sessions += r.totalSessions;
-			acc.credits += r.totalCredits;
-			acc.premiumRequests += r.totalPremiumRequests;
-		}
+		acc.tasks += r.totalTasks;
+		acc.sessions += r.totalSessions;
+		acc.credits += r.totalCredits;
+		acc.premiumRequests += r.totalPremiumRequests;
 		return acc;
 	}, { tasks: 0, sessions: 0, credits: 0, premiumRequests: 0 });
 
-	const hasPartial = data.repos.some(r => r.partial && !r.error);
+	const hasPartial = data.repos.some(r => r.partial || r.error);
 	const tile = 'background:var(--bg-tertiary); border:1px solid var(--border-color); border-radius:6px; padding:12px 20px; text-align:center; min-width:80px;';
 
 	return `
@@ -2839,10 +2811,8 @@ function renderAgentSessionsContent(data: AgentSessionsResult): string {
 		</div>
 		<div style="font-size:11px; color:var(--text-secondary); margin-bottom:12px;">
 			Showing cloud-agent sessions from ${sinceDate} to now.
-			${hasPartial ? '<strong>Note:</strong> Some repos were capped — totals are lower bounds. ' : ''}
-			${data.accountTasksAvailable
-				? ''
-				: `<strong>Account-wide tasks unavailable:</strong> ${data.accountTasksError ?? 'the /agents/tasks endpoint could not be read'} — only workspace repositories are shown.`}
+			${hasPartial ? `${escapeHtml(localize('usage.githubActivity.lowerBoundNote'))} ` : ''}
+			${accountTasksNoteHtml(data)}
 		</div>
 		${renderAgentSessionsTable(data.repos)}
 		<div style="margin-top:8px; font-size:10px; color:var(--text-muted); border-top:1px solid var(--border-subtle); padding-top:8px;">
@@ -2873,16 +2843,16 @@ function buildModelCostSectionHtml(stats: UsageAnalysisStats): string {
 	const p30 = stats.last30Days.modelSwitching;
 	const today = stats.today.modelSwitching;
 	// Only show if we have any request data
-	if ((p30.totalRequests ?? 0) === 0 && (today.totalRequests ?? 0) === 0) { return ''; }
+	if ((p30.totalRequests ?? 0) === 0 && (today.totalRequests ?? 0) === 0 && (stats.lastMonth.modelSwitching.totalRequests ?? 0) === 0) { return ''; }
 
 	function renderCostPeriod(ms: ModelSwitchingAnalysis): string {
 		const total = ms.totalRequests ?? 0;
 		if (total === 0) { return '<div style="color: var(--text-muted); font-size: 11px;">No data</div>'; }
 		const buckets: { label: string; count: number; color: string }[] = [
-			{ label: '💚 Low cost', count: ms.lowCostRequests ?? 0, color: '#4ade80' },
-			{ label: '🔵 Medium cost', count: ms.mediumCostRequests ?? 0, color: 'var(--link-color)' },
-			{ label: '💸 High cost', count: ms.highCostRequests ?? 0, color: 'var(--warning-fg)' },
-			{ label: '❓ Unknown', count: ms.unknownRequests ?? 0, color: 'var(--text-muted)' },
+			{ label: modelCostTierLabelHtml('low'), count: ms.lowCostRequests ?? 0, color: '#4ade80' },
+			{ label: modelCostTierLabelHtml('medium'), count: ms.mediumCostRequests ?? 0, color: 'var(--link-color)' },
+			{ label: modelCostTierLabelHtml('high'), count: ms.highCostRequests ?? 0, color: 'var(--warning-fg)' },
+			{ label: modelCostTierLabelHtml('unknown'), count: ms.unknownRequests ?? 0, color: 'var(--text-muted)' },
 		].filter(b => b.count > 0);
 		const rows = buckets.map(b => {
 			const pct = total > 0 ? Math.round((b.count / total) * 100) : 0;
@@ -2915,15 +2885,15 @@ function buildModelCostSectionHtml(stats: UsageAnalysisStats): string {
 					${renderCostPeriod(p30)}
 				</div>
 				<div>
-					<h4 style="color: var(--text-primary); font-size: 13px; margin-bottom: 8px;">📅 Previous Month</h4>
-					${renderCostPeriod(stats.month.modelSwitching)}
+					<h4 style="color: var(--text-primary); font-size: 13px; margin-bottom: 8px;">📅 ${escapeHtml(localize('usage.toolPeriod.colPreviousMonth'))}</h4>
+					${renderCostPeriod(stats.lastMonth.modelSwitching)}
 				</div>
 			</div>
 		</div>`;
 }
 
 function buildThinkingEffortSectionHtml(stats: UsageAnalysisStats): string {
-	const effortData = stats.last30Days.thinkingEffortUsage || stats.today.thinkingEffortUsage || stats.month.thinkingEffortUsage;
+	const effortData = stats.last30Days.thinkingEffortUsage || stats.today.thinkingEffortUsage || stats.lastMonth.thinkingEffortUsage;
 	if (!effortData) { return ''; }
 	return `
 		<!-- Thinking Effort Section -->
@@ -2940,8 +2910,8 @@ function buildThinkingEffortSectionHtml(stats: UsageAnalysisStats): string {
 					${renderEffortPeriodHtml(stats.last30Days.thinkingEffortUsage)}
 				</div>
 				<div>
-					<h4 style="color: var(--text-primary); font-size: 13px; margin-bottom: 8px;">📅 Previous Month</h4>
-					${renderEffortPeriodHtml(stats.month.thinkingEffortUsage)}
+					<h4 style="color: var(--text-primary); font-size: 13px; margin-bottom: 8px;">📅 ${escapeHtml(localize('usage.toolPeriod.colPreviousMonth'))}</h4>
+					${renderEffortPeriodHtml(stats.lastMonth.thinkingEffortUsage)}
 				</div>
 			</div>
 		</div>`;
@@ -2978,12 +2948,18 @@ function buildUsageAllKeysSets(stats: UsageAnalysisStats): {
 	allUnknownModels: string[];
 } {
 	return {
-		allStandardModels: [...new Set([...stats.today.modelSwitching.standardModels, ...stats.last30Days.modelSwitching.standardModels, ...stats.month.modelSwitching.standardModels])].sort(),
-		allHighCostModels: [...new Set([...stats.today.modelSwitching.highCostModels, ...stats.last30Days.modelSwitching.highCostModels, ...stats.month.modelSwitching.highCostModels])].sort(),
-		allLowCostModels: [...new Set([...stats.today.modelSwitching.lowCostModels, ...stats.last30Days.modelSwitching.lowCostModels, ...stats.month.modelSwitching.lowCostModels])].sort(),
-		allMediumCostModels: [...new Set([...stats.today.modelSwitching.mediumCostModels, ...stats.last30Days.modelSwitching.mediumCostModels, ...stats.month.modelSwitching.mediumCostModels])].sort(),
-		allUnknownModels: [...new Set([...stats.today.modelSwitching.unknownModels, ...stats.last30Days.modelSwitching.unknownModels, ...stats.month.modelSwitching.unknownModels])].sort(),
+		allStandardModels: [...new Set([...stats.today.modelSwitching.standardModels, ...stats.last30Days.modelSwitching.standardModels, ...stats.lastMonth.modelSwitching.standardModels])].sort(),
+		allHighCostModels: [...new Set([...stats.today.modelSwitching.highCostModels, ...stats.last30Days.modelSwitching.highCostModels, ...stats.lastMonth.modelSwitching.highCostModels])].sort(),
+		allLowCostModels: [...new Set([...stats.today.modelSwitching.lowCostModels, ...stats.last30Days.modelSwitching.lowCostModels, ...stats.lastMonth.modelSwitching.lowCostModels])].sort(),
+		allMediumCostModels: [...new Set([...stats.today.modelSwitching.mediumCostModels, ...stats.last30Days.modelSwitching.mediumCostModels, ...stats.lastMonth.modelSwitching.mediumCostModels])].sort(),
+		allUnknownModels: [...new Set([...stats.today.modelSwitching.unknownModels, ...stats.last30Days.modelSwitching.unknownModels, ...stats.lastMonth.modelSwitching.unknownModels])].sort(),
 	};
+}
+
+/** The two memory sections (on-disk files, then server-side repository memories) shown on the Workspace Health tab. */
+function buildMemorySectionsHtml(stats: UsageAnalysisStats): string {
+	return buildMemoryFilesSectionHtml(currentMemoryFilesAnalysis ?? stats.memoryFilesAnalysis)
+		+ buildServerMemoriesSectionHtml(currentServerMemoriesAnalysis ?? stats.serverMemoriesAnalysis);
 }
 
 function buildHealthTabPanelHtml(customizationHtml: string, stats: UsageAnalysisStats): string {
@@ -2991,6 +2967,8 @@ function buildHealthTabPanelHtml(customizationHtml: string, stats: UsageAnalysis
 		<div id="tab-panel-health" class="tab-panel"${activeTab !== 'health' ? ' style="display:none"' : ''}>
 			${customizationHtml}
 			${renderMissedPotential(stats)}
+			${buildMemorySectionsHtml(stats)}
+			${buildCurationSectionHtml(currentCurationAnalysis ?? stats.curationAnalysis)}
 
 			<!-- Repository Setup Section -->
 			<div class="repo-hygiene-section" id="section-repo-hygiene" style="margin-top: 16px; margin-bottom: 16px; padding: 12px; background: var(--bg-tertiary); border: 1px solid var(--border-color); border-radius: 6px;">
@@ -3283,7 +3261,7 @@ function buildInsightCardHtml(insight: EvaluatedInsight): string {
 		</div>`;
 }
 
-function buildInsightsTabPanelHtml(insights: EvaluatedInsight[]): string {
+function buildInsightsTabPanelHtml(insights: EvaluatedInsight[], repeatedTasks: RepeatedTaskReport | null): string {
 	const applicable = insights.filter(i => i.status !== 'dismissed');
 	const newInsights = applicable.filter(i => i.status === 'new');
 	const otherInsights = applicable.filter(i => i.status !== 'new' && i.status !== 'done');
@@ -3316,6 +3294,7 @@ function buildInsightsTabPanelHtml(insights: EvaluatedInsight[]): string {
 					${allSection}
 				</div>
 			</div>
+			${safeSectionHtml('Skill Suggestions', () => buildSkillSuggestionsSectionHtml(repeatedTasks))}
 		</div>`;
 }
 
@@ -3325,7 +3304,7 @@ function usageTabStripInput(stats: UsageAnalysisStats): UsageTabStripInput {
 		activeTab,
 		newInsightCount: (stats.insights ?? []).filter(i => i.status === 'new').length,
 		correctionSessionCount: stats.correctionReport?.sessionsWithMoments ?? 0,
-		readinessButtonHtml: darkFactoryTab.button(activeTab),
+		readinessAvailable: darkFactoryTab.isAvailable(),
 	};
 }
 
@@ -3477,29 +3456,26 @@ function buildCorrectionRepoSectionHtml(repo: CorrectionRepoGroup, activeFilter:
 	</div>`;
 }
 
-function buildCorrectionsTabPanelHtml(report: CorrectionReport | null | undefined): string {
+/** The Corrections tab's contents, without the panel element: a filter click re-renders just this into the live panel. */
+function buildCorrectionsTabContentHtml(report: CorrectionReport | null | undefined): string {
 	if (typeof report === 'undefined') {
 		return `
-		<div id="tab-panel-corrections" class="tab-panel"${activeTab !== 'corrections' ? ' style="display:none"' : ''}>
-			<div class="section">
-				<div class="section-title"><span>🔁</span><span>Corrections</span></div>
-				<div class="section-subtitle">Moments where the agent corrected itself after an error, or you had to correct the agent.</div>
-				<div style="margin-top:16px; padding:16px; background:var(--bg-tertiary); border-radius:8px; font-size:12px; color:var(--text-secondary); text-align:center;">
-					⏳ Scanning recent sessions for correction moments…
-				</div>
+		<div class="section">
+			<div class="section-title"><span>🔁</span><span>Corrections</span></div>
+			<div class="section-subtitle">Moments where the agent corrected itself after an error, or you had to correct the agent.</div>
+			<div style="margin-top:16px; padding:16px; background:var(--bg-tertiary); border-radius:8px; font-size:12px; color:var(--text-secondary); text-align:center;">
+				⏳ Scanning recent sessions for correction moments…
 			</div>
 		</div>`;
 	}
 
 	if (!report || report.repos.length === 0) {
 		return `
-		<div id="tab-panel-corrections" class="tab-panel"${activeTab !== 'corrections' ? ' style="display:none"' : ''}>
-			<div class="section">
-				<div class="section-title"><span>🔁</span><span>Corrections</span></div>
-				<div class="section-subtitle">Moments where the agent corrected itself after an error, or you had to correct the agent.</div>
-				<div style="margin-top:16px; padding:16px; background:var(--bg-tertiary); border-radius:8px; font-size:12px; color:var(--text-secondary); text-align:center;">
-					✨ No correction moments detected in your recent sessions — nice and smooth!
-				</div>
+		<div class="section">
+			<div class="section-title"><span>🔁</span><span>Corrections</span></div>
+			<div class="section-subtitle">Moments where the agent corrected itself after an error, or you had to correct the agent.</div>
+			<div style="margin-top:16px; padding:16px; background:var(--bg-tertiary); border-radius:8px; font-size:12px; color:var(--text-secondary); text-align:center;">
+				✨ No correction moments detected in your recent sessions — nice and smooth!
 			</div>
 		</div>`;
 	}
@@ -3516,22 +3492,24 @@ function buildCorrectionsTabPanelHtml(report: CorrectionReport | null | undefine
 		: '';
 
 	return `
-		<div id="tab-panel-corrections" class="tab-panel"${activeTab !== 'corrections' ? ' style="display:none"' : ''}>
-			<div class="section">
-				<div class="section-title"><span>🔁</span><span>Corrections</span></div>
-				<div class="section-subtitle">
-					Moments where the agent corrected itself after an error, or you had to correct the agent —
-					heuristic detection over each repository's ${report.sessionsPerRepo} most recent sessions with detected moments —
-					sessions without corrections are not listed. Summary counts include all detected moments; long sessions show a capped detail sample.
-					Pattern-based matches are candidates, not verdicts; open the session in the log viewer for full context.
-				</div>
-				<div style="font-size:11px; color:var(--text-secondary); margin-top:12px;">Filter the list below — select a pill to drill down, select it again to clear.</div>
-				<div style="display:flex; flex-wrap:wrap; gap:6px; margin-top:6px;">${summaryChips}</div>
-				${statusBar}
-				${repoSections}
-				${emptyFilteredState}
+		<div class="section">
+			<div class="section-title"><span>🔁</span><span>Corrections</span></div>
+			<div class="section-subtitle">
+				Moments where the agent corrected itself after an error, or you had to correct the agent —
+				heuristic detection over each repository's ${report.sessionsPerRepo} most recent sessions with detected moments —
+				sessions without corrections are not listed. Summary counts include all detected moments; long sessions show a capped detail sample.
+				Pattern-based matches are candidates, not verdicts; open the session in the log viewer for full context.
 			</div>
+			<div style="font-size:11px; color:var(--text-secondary); margin-top:12px;">Filter the list below — select a pill to drill down, select it again to clear.</div>
+			<div style="display:flex; flex-wrap:wrap; gap:6px; margin-top:6px;">${summaryChips}</div>
+			${statusBar}
+			${repoSections}
+			${emptyFilteredState}
 		</div>`;
+}
+
+function buildCorrectionsTabPanelHtml(report: CorrectionReport | null | undefined): string {
+	return `<div id="tab-panel-corrections" class="tab-panel"${activeTab !== 'corrections' ? ' style="display:none"' : ''}>${buildCorrectionsTabContentHtml(report)}</div>`;
 }
 
 /** Finds the repo group backing a correction "Ask Copilot"/"Copy prompt" button, and builds its prompt. */
@@ -3567,7 +3545,8 @@ function handleCorrectionPromptButtonClick(target: HTMLElement): boolean {
 
 function wireCorrectionInteractions(): void {
 	const panel = document.getElementById('tab-panel-corrections');
-	if (!panel) { return; }
+	if (!panel || panel.dataset.correctionInteractionsWired === 'true') { return; }
+	panel.dataset.correctionInteractionsWired = 'true';
 	panel.addEventListener('click', (event) => {
 		const target = event.target as HTMLElement;
 		if (target.closest('button.correction-clear-filter')) {
@@ -3597,8 +3576,8 @@ function wireCorrectionInteractions(): void {
 function renderCorrectionsPanel(): void {
 	const panel = document.getElementById('tab-panel-corrections');
 	if (!panel) { return; }
-	setHtml(panel, buildCorrectionsTabPanelHtml(currentCorrectionReport));
-	wireCorrectionInteractions();
+	// The delegated click listener lives on the panel itself, which this keeps in place.
+	setHtml(panel, buildCorrectionsTabContentHtml(currentCorrectionReport));
 }
 
 
@@ -3609,7 +3588,7 @@ function updateTabButtonCount(insights: EvaluatedInsight[]): void {
 	const badgeHtml = newCount > 0
 		? ` <span style="background:rgba(96,165,250,0.4);border-radius:10px;padding:1px 6px;font-size:11px;">${newCount}</span>`
 		: '';
-	const titleOnly = '<span class="codicon codicon-lightbulb"></span> Insights';
+	const titleOnly = `<span class="codicon codicon-lightbulb"></span> ${escapeHtml(localize('usage.tab.insights'))}`;
 	setHtml(tabButton, titleOnly + badgeHtml);
 }
 
@@ -3736,10 +3715,6 @@ function buildUsageRootHtml(
 	sessionsSummaryHtml: string,
 	todayTotalRefs: number,
 	last30DaysTotalRefs: number,
-	allHighCostModels: string[],
-	allLowCostModels: string[],
-	allMediumCostModels: string[],
-	allUnknownModels: string[],
 ): string {
 	return `
 		<style>${themeStyles}</style><style>${dataTableStyles}</style>
@@ -3761,9 +3736,7 @@ function buildUsageRootHtml(
 					<span class="info-box-chevron" aria-hidden="true">${aboutCollapsed ? '▸' : '▾'}</span>
 				</div>
 				<div class="info-box-body" id="about-info-body"${aboutCollapsed ? ' style="display:none"' : ''}>
-					This dashboard analyzes your GitHub Copilot usage patterns by examining session log files.
-					It tracks modes (ask/edit/agent), tool usage, context references (#file, @workspace, etc.),
-					and MCP (Model Context Protocol) tools to help you understand how you interact with Copilot.
+					${escapeHtml(localize('usage.about.body'))}
 				</div>
 			</div>
 
@@ -3771,12 +3744,13 @@ function buildUsageRootHtml(
 
 			${safeSectionHtml('Recent Sessions', () => buildSessionsTabPanelHtml(stats))}
 			${safeSectionHtml('My Activity', () => buildActivityTabPanelHtml(stats, multiModelHtml, thinkingEffortHtml, sessionsSummaryHtml, todayTotalRefs, last30DaysTotalRefs))}
-			${safeSectionHtml('Tools & Integrations', () => buildToolsTabPanelHtml(stats, allHighCostModels, allLowCostModels, allMediumCostModels, allUnknownModels))}
+			${safeSectionHtml('Tools & Integrations', () => buildToolsTabPanelHtml(stats))}
 			${safeSectionHtml('Workspace Health', () => buildHealthTabPanelHtml(customizationHtml, stats))}
 			${safeSectionHtml('Repository PRs & Cloud Agent', () => buildReposAndAgentTabPanelsHtml())}
+			${safeSectionHtml('AI Billing', () => buildBillingTabPanelHtml(stats))}
 			${safeSectionHtml('AI Readiness', () => darkFactoryTab.panel(activeTab))}
 			${safeSectionHtml('Worktrees', () => buildWorktreesTabPanelHtml())}
-			${safeSectionHtml('Insights', () => buildInsightsTabPanelHtml(stats.insights ?? []))}
+			${safeSectionHtml('Insights', () => buildInsightsTabPanelHtml(stats.insights ?? [], stats.repeatedTasks ?? null))}
 			${safeSectionHtml('Corrections', () => buildCorrectionsTabPanelHtml(stats.correctionReport))}
 			<div class="footer">
 				Last updated: ${escapeHtml(new Date(stats.lastUpdated).toLocaleString())} · Updates every 5 minutes
@@ -3919,10 +3893,23 @@ const WORKTREE_DETAIL_COLUMNS: DataTableColumn<WorktreeResult>[] = [
 	},
 	{
 		id: "actions", label: "Actions",
-		render: (w) => ({ html: `<a href="#" class="worktree-reveal-link" data-path="${encodeURIComponent(w.path)}">Open</a>
-      <a href="#" class="worktree-delete-link" data-path="${encodeURIComponent(w.path)}" data-branch="${encodeURIComponent(w.branch)}" data-repo="${encodeURIComponent(w.repoLabel)}" data-pushed="${escapeHtml(w.pushed)}" title="Remove via git worktree remove (asks for confirmation)">🗑️ Delete</a>` }),
+		render: (w) => ({ html: `<div class="worktree-row-actions">
+      <button type="button" class="worktree-row-btn worktree-reveal-link" data-path="${encodeURIComponent(w.path)}" title="${escapeHtml(localize("usage.worktreeCleanup.openTitle"))}">${escapeHtml(localize("usage.worktreeCleanup.open"))}</button>
+      ${buildWorktreeDeleteButtonHtml(w)}
+    </div>` }),
 	},
 ];
+
+/** Row "Delete" button; swapped for a disabled status while the running cleanup owns that worktree. */
+function buildWorktreeDeleteButtonHtml(w: WorktreeResult): string {
+	if (worktreeCleanupCurrent?.path === w.path && worktreeCleanupInProgress) {
+		return `<button type="button" class="worktree-row-btn" disabled>${escapeHtml(localize("usage.worktreeCleanup.deletingBtn"))}</button>`;
+	}
+	if (isWorktreeInCleanupQueue(w.path)) {
+		return `<button type="button" class="worktree-row-btn" disabled title="${escapeHtml(localize("usage.worktreeCleanup.queuedBtnTitle"))}">${escapeHtml(localize("usage.worktreeCleanup.queuedBtn"))}</button>`;
+	}
+	return `<button type="button" class="worktree-row-btn danger worktree-delete-link" data-path="${encodeURIComponent(w.path)}" data-branch="${encodeURIComponent(w.branch)}" data-repo="${encodeURIComponent(w.repoLabel)}" data-pushed="${escapeHtml(w.pushed)}" title="${escapeHtml(localize("usage.worktreeCleanup.deleteBtnTitle"))}">${escapeHtml(localize("usage.worktreeCleanup.deleteBtn"))}</button>`;
+}
 
 /** The per-worktree details table shown when a repository row is expanded; one stable table per repository. */
 function buildWorktreeDetailsTableHtml(repoLabel: string, worktrees: WorktreeResult[]): string {
@@ -3951,11 +3938,36 @@ function worktreeSizeText(worktrees: WorktreeResult[]): string {
  * every render.
  */
 function buildWorktreeRepoCleanupButtonHtml(repoLabel: string, worktrees: WorktreeResult[]): string {
-	const pushedCount = worktrees.filter((w) => w.pushed === "yes" && !isWorktreePending(w)).length;
-	const disabled = worktreeCleanupInProgress || worktreeCleanupConfirmPending || worktreeScanInProgress || pushedCount === 0;
-	return `<button type="button" class="button secondary worktree-repo-cleanup-btn" data-repo="${encodeURIComponent(repoLabel)}"
-    title="Remove this repository's pushed worktrees via git worktree remove (asks for confirmation)" ${disabled ? "disabled" : ""}
-    >🧹 Clean up (${pushedCount})</button>`;
+	const pushedCount = worktrees.filter((w) => w.pushed === "yes" && !isWorktreePending(w) && !isWorktreeInCleanupQueue(w.path)).length;
+	const disabled = worktreeCleanupConfirmPending || worktreeScanInProgress || pushedCount === 0;
+	const label = worktreeCleanupInProgress ? `➕ Queue (${pushedCount})` : `🧹 Clean up (${pushedCount})`;
+	const title = worktreeCleanupInProgress
+		? "Add this repository's pushed worktrees to the running cleanup (asks for confirmation)"
+		: "Remove this repository's pushed worktrees via git worktree remove (asks for confirmation)";
+	return `${buildWorktreeRepoCleanupBadge(repoLabel)}<button type="button" class="button secondary worktree-repo-cleanup-btn" data-repo="${encodeURIComponent(repoLabel)}"
+    title="${title}" ${disabled ? "disabled" : ""}
+    >${label}</button>`;
+}
+
+/** "Cleaning…" / "Queued (n)" marker so the repository table shows where the running cleanup is. */
+function buildWorktreeRepoCleanupBadge(repoLabel: string): string {
+	if (!worktreeCleanupInProgress) { return ""; }
+	if (worktreeCleanupCurrent?.repoLabel === repoLabel) {
+		return `<span class="worktree-repo-badge active" role="status">${escapeHtml(localize("usage.worktreeCleanup.badgeCleaning"))}</span>`;
+	}
+	const waiting = worktreeCleanupWaitingByRepo.get(repoLabel) ?? 0;
+	return waiting > 0 ? `<span class="worktree-repo-badge">${escapeHtml(localizeFormat("usage.worktreeCleanup.badgeQueued", String(waiting)))}</span>` : "";
+}
+
+/** Counts, per repository, the queued worktrees the running cleanup has not reached yet. */
+function countWaitingCleanupByRepo(): Map<string, number> {
+	const waiting = new Map<string, number>();
+	if (!worktreeCleanupInProgress) { return waiting; }
+	for (const t of worktreeCleanupQueue.slice(worktreeCleanupStatus.processed)) {
+		if (t.path === worktreeCleanupCurrent?.path) { continue; }
+		waiting.set(t.repoLabel, (waiting.get(t.repoLabel) ?? 0) + 1);
+	}
+	return waiting;
 }
 
 /** Sum of the known (enriched) bytes across a repository's worktrees. */
@@ -3972,6 +3984,7 @@ type WorktreeRepoGroup = { repo: string; worktrees: WorktreeResult[] };
  */
 function buildWorktreeRepoTableHtml(groups: Map<string, WorktreeResult[]>): string {
 	// Pre-sorted by name so repositories with equal counts or sizes keep a stable, alphabetical order.
+	worktreeCleanupWaitingByRepo = countWaitingCleanupByRepo();
 	const rows: WorktreeRepoGroup[] = [...groups.entries()]
 		.map(([repo, worktrees]) => ({ repo, worktrees }))
 		.sort((a, b) => a.repo.localeCompare(b.repo));
@@ -4007,14 +4020,15 @@ function buildWorktreeRepoTableHtml(groups: Map<string, WorktreeResult[]>): stri
  */
 function getCleanupCandidates(repoLabel?: string): WorktreeResult[] {
 	return worktreeResults.filter((w) =>
-		w.pushed === "yes" && !isWorktreePending(w) && (repoLabel === undefined || w.repoLabel === repoLabel));
+		w.pushed === "yes" && !isWorktreePending(w) && !isWorktreeInCleanupQueue(w.path) && (repoLabel === undefined || w.repoLabel === repoLabel));
 }
 
 /** The cleanup trigger, rendered as its own card inside the hero summary-cards row (to the right of Worktrees/Repositories/Total Size). */
 function renderWorktreeCleanupCard(): string {
 	const pushedCount = getCleanupCandidates().length;
-	const disabled = worktreeCleanupInProgress || worktreeCleanupConfirmPending || worktreeScanInProgress || pushedCount === 0;
-	const label = worktreeCleanupConfirmPending ? "⏳ Waiting…" : `🧹 Clean Up (${pushedCount})`;
+	const disabled = worktreeCleanupConfirmPending || worktreeScanInProgress || pushedCount === 0;
+	const idleLabel = worktreeCleanupInProgress ? `➕ Queue all (${pushedCount})` : `🧹 Clean Up (${pushedCount})`;
+	const label = worktreeCleanupConfirmPending ? "⏳ Waiting…" : idleLabel;
 	return `<div class="summary-card worktree-cleanup-card">
     <div class="summary-label">Pushed Worktrees</div>
     <div class="worktree-cleanup-card-actions">
@@ -4101,12 +4115,39 @@ function buildWorktreeCleanupDetailChips(d: WorktreeCleanupDiagnostics | undefin
 	return chips.length === 0 ? "" : `<div class="worktree-cleanup-chips">${chips.join("")}</div>`;
 }
 
+const worktreePromptResetTimers = new WeakMap<HTMLElement, ReturnType<typeof setTimeout>>();
+
+/** Copies the prompt and flashes "Copied!"; always restores the stable localized label, never whatever is showing. */
+function copyWorktreePrompt(button: HTMLElement, prompt: string): void {
+	let write: Promise<void>;
+	try {
+		if (typeof navigator.clipboard?.writeText !== "function") { return; }
+		write = navigator.clipboard.writeText(prompt);
+	} catch {
+		return;
+	}
+	write.then(() => {
+		button.textContent = localize("usage.worktreeCleanup.copied");
+		clearTimeout(worktreePromptResetTimers.get(button));
+		worktreePromptResetTimers.set(button, setTimeout(() => {
+			worktreePromptResetTimers.delete(button);
+			button.textContent = localize("usage.worktreeCleanup.copyPrompt");
+		}, 2000));
+	}).catch(() => { /* clipboard unavailable: leave the label unchanged */ });
+}
+
+/** Starter prompt for a chat session opened in a worktree that could not be deleted, to understand what its diff holds. */
+function buildWorktreeDiffPrompt(branch: string): string {
+	return localizeFormat("usage.worktreeCleanup.starterPrompt", branch || "?");
+}
+
 /** Per-row remediation actions for a worktree the cleanup could not delete. */
 function buildWorktreeCleanupActions(e: WorktreeCleanupLogEntry): string {
 	const p = encodeURIComponent(e.path);
 	return `<div class="worktree-cleanup-log-actions">
       <button type="button" class="button secondary worktree-open-editor-btn" data-path="${p}" title="Open this worktree folder in a new VS Code window so you can commit, push, or clean it up">💻 Open in VS Code</button>
       <button type="button" class="button secondary worktree-reveal-btn" data-path="${p}" title="Show this folder in the OS file explorer">📂 Reveal folder</button>
+      <button type="button" class="button secondary worktree-copy-prompt-btn" data-branch="${encodeURIComponent(e.branch)}" title="${escapeHtml(localize("usage.worktreeCleanup.copyPromptTitle"))}">${escapeHtml(localize("usage.worktreeCleanup.copyPrompt"))}</button>
       <button type="button" class="button secondary worktree-delete-btn" data-path="${p}" data-branch="${encodeURIComponent(e.branch)}" data-repo="${encodeURIComponent(e.repoLabel)}" data-pushed="?" title="Try removing it again — you will be asked to confirm, and to force-delete if it still has uncommitted changes">🗑️ Delete anyway…</button>
     </div>`;
 }
@@ -4151,13 +4192,43 @@ function renderWorktreeCleanupLog(): string {
 	return `<div class="worktree-cleanup-log">${rows}</div>`;
 }
 
+/** Total bytes freed by the deleted worktrees of this run (bulk deletions and later "Delete anyway…" retries). */
+function getCleanupRecoveredBytes(): number {
+	let total = 0;
+	for (const e of worktreeCleanupLog) {
+		// Only rows this run actually deleted (or the user retried successfully) free space; a late
+		// delete from an earlier run or an unrelated manual delete must not inflate the total.
+		const deleted = e.status === "deleted" || worktreeRetryState.get(e.path)?.status === "deleted";
+		if (deleted) { total += worktreeDeletedBytes.get(e.path) ?? 0; }
+	}
+	return total;
+}
+
+/** "Now deleting: branch in repo" line so the user can tell which repository the cleanup is working on. */
+function renderWorktreeCleanupCurrent(): string {
+	const cur = worktreeCleanupCurrent;
+	if (!cur) { return ""; }
+	const size = worktreeResults.find((w) => w.path === cur.path);
+	const sizeText = size && knownBytes(size) > 0 ? ` (${formatFileSize(knownBytes(size))})` : "";
+	return `<div class="worktree-cleanup-current">
+      <div>${localizeFormat("usage.worktreeCleanup.nowDeleting", `<strong>${escapeHtml(cur.branch)}</strong>`, `<strong>${escapeHtml(cur.repoLabel || localize("usage.worktreeCleanup.unknownRepo"))}</strong>`, escapeHtml(sizeText))}</div>
+      <div class="worktree-cleanup-log-path">${escapeHtml(cur.path)}</div>
+    </div>`;
+}
+
 function renderWorktreeCleanupStatus(): string {
 	if (worktreeCleanupInProgress) {
 		const { processed, total } = worktreeCleanupStatus;
 		const pct = total > 0 ? Math.round((processed / total) * 100) : 0;
-		return `<div class="info-box" style="margin-top: 12px;">
+		const waiting = [...countWaitingCleanupByRepo().values()].reduce((s, n) => s + n, 0);
+		const progressText = waiting > 0
+			? localizeFormat("usage.worktreeCleanup.progressWaiting", String(processed), String(total), String(waiting))
+			: localizeFormat("usage.worktreeCleanup.progress", String(processed), String(total));
+		return `<div class="info-box worktree-cleanup-sticky" style="margin-top: 12px;">
       <div class="info-box-title">🧹 Cleaning up pushed worktrees…</div>
-      <div>${processed} / ${total} processed</div>
+      ${renderWorktreeCleanupCurrent()}
+      <div>${escapeHtml(progressText)}</div>
+      <div>${escapeHtml(localizeFormat("usage.worktreeCleanup.recovered", formatFileSize(getCleanupRecoveredBytes())))}</div>
       <div class="worktree-progress-bar"><div class="worktree-progress-fill" style="width: ${pct}%;"></div></div>
     </div>${renderWorktreeCleanupLog()}`;
 	}
@@ -4170,6 +4241,7 @@ function renderWorktreeCleanupStatus(): string {
 	return `<div class="info-box" style="margin-top: 12px;">
     <div class="info-box-title">🧹 Cleanup finished</div>
     <div>✅ ${deleted} deleted · ⏭️ ${skipped} skipped (uncommitted/unpushed) · ${errors > 0 ? `❌ ${errors} error${errors === 1 ? "" : "s"}` : "0 errors"}</div>
+    <div class="worktree-cleanup-recovered" title="${escapeHtml(localizeFormat("usage.worktreeCleanup.sizeChipTitle", getCleanupRecoveredBytes().toLocaleString()))}">💾 ${escapeHtml(localizeFormat("usage.worktreeCleanup.recovered", formatFileSize(getCleanupRecoveredBytes())))}</div>
   </div>${renderWorktreeCleanupLog()}`;
 }
 
@@ -4298,7 +4370,7 @@ function _billingApiBalanceHtml(api: CopilotApiBalance, copilotCostUsd: number):
 		</div>`;
 }
 
-function _billingCoverageAnalysisHtml(api: CopilotApiBalance | null | undefined, copilotCostUsd: number, nonCopilotCostUsd: number): string {
+function _billingCoverageAnalysisHtml(api: CopilotApiBalance | null | undefined, copilotCostUsd: number, nonCopilotCostUsd: number, gapUsd: number): string {
 	if (!api) {
 		return `
 			<div style="font-size:11px; color:var(--text-muted); margin-bottom:8px; line-height:1.5;">
@@ -4306,9 +4378,8 @@ function _billingCoverageAnalysisHtml(api: CopilotApiBalance | null | undefined,
 				The extension only tracks local IDE sessions — it cannot see web chat, cloud agent, or review agent usage.
 			</div>`;
 	}
-	if (copilotCostUsd <= 0) { return ''; }
+	if (copilotCostUsd <= 0 && api.usedAiCredits <= 0) { return ''; }
 	const apiUsedUsd = api.usedAiCredits * 0.01;
-	const gapUsd = apiUsedUsd - copilotCostUsd;
 	const gapCredits = Math.round(gapUsd * 100);
 	const gapRow = gapCredits > 0
 		? `<div style="display:flex; justify-content:space-between; padding-top:6px; border-top:1px solid var(--border-subtle); color:var(--text-secondary);"><span>Gap (untracked Copilot usage)</span><span>$${formatFixed(gapUsd, 2)} (${formatNumber(gapCredits)} credits)</span></div>`
@@ -4331,79 +4402,46 @@ function _billingCoverageAnalysisHtml(api: CopilotApiBalance | null | undefined,
 		</div>`;
 }
 
-/** Localized explanation for an account that has no usable budget figure. */
-function accountBudgetNote(b: AccountBudgetView): string {
-	if (b.status === 'no-quota') { return localize('accountBudgets.noQuota'); }
-	if (b.reason === 'no-session') { return localize('accountBudgets.noSession'); }
-	if (b.reason === 'lookup-failed') { return localizeFormat('accountBudgets.lookupFailed', b.detail ?? ''); }
-	return b.detail ?? localize('accountBudgets.unavailable');
-}
-
 /** The last stats handed to renderLayout(), so a live account update can re-render when no mount point exists. */
 let lastRenderedStats: UsageAnalysisStats | null = null;
 
-/** One account's row in the per-account budget list. */
-function _accountBudgetRowHtml(b: AccountBudgetView): string {
-	const plan = b.planName ? ` <span style="color:var(--text-muted);">(${escapeHtml(b.planName)})</span>` : '';
-	const name = `<span style="font-weight:600;">${escapeHtml(b.label)}</span>${plan}`;
-	if (b.status !== 'ok' || !b.balance) {
-		const note = escapeHtml(accountBudgetNote(b));
-		return `<div style="display:flex; justify-content:space-between; gap:12px; font-size:12px;"><span>${name}</span><span style="color:var(--text-muted);">${note}</span></div>`;
-	}
-	const usedPct = Math.min(100, Math.max(0, 100 - b.balance.pctAvailable));
-	const color = usedPct > 90 ? 'var(--error-color, #f14c4c)' : usedPct > 75 ? 'var(--warning-color, #cca700)' : 'var(--accent-color, #4d9cf8)';
-	const reset = b.resetDate ? ` · ${escapeHtml(localizeFormat('accountBudgets.resets', b.resetDate.slice(0, 10)))}` : '';
-	return `
-		<div style="font-size:12px;">
-			<div style="display:flex; justify-content:space-between; gap:12px; margin-bottom:4px;">
-				<span>${name}</span>
-				<span>${escapeHtml(localizeFormat('accountBudgets.usedLeft', '$' + formatFixed(b.balance.usedAiCredits / 100, 2), '$' + formatFixed(b.balance.budgetUsd, 2), formatFixed(b.balance.pctAvailable, 1)))}${reset}</span>
-			</div>
-			<div style="height:6px; border-radius:3px; background:var(--border-subtle); overflow:hidden;"><div style="height:100%; width:${formatFixed(usedPct, 2)}%; background:${color};"></div></div>
-		</div>`;
-}
-
-/** Budget per GitHub account. Omitted only for a lone account with a balance, which the API balance card already shows. */
-function buildAccountBudgetsHtml(accounts: AccountBudgetView[] | undefined, apiBalanceShown: boolean): string {
-	const list = accounts ?? [];
-	if (!shouldListAccountBudgets(list, apiBalanceShown)) { return ''; }
-	return `
-		<div style="margin-bottom:12px;">
-			<div style="font-size:12px; font-weight:600; color:var(--text-secondary); margin-bottom:6px;">${escapeHtml(localize('accountBudgets.title'))}</div>
-			<div style="background:var(--bg-tertiary); border:1px solid var(--border-subtle); border-radius:6px; padding:12px 14px; display:flex; flex-direction:column; gap:10px; color:var(--text-primary);">
-				${list.map(_accountBudgetRowHtml).join('')}
-			</div>
-		</div>`;
-}
-
 /** Whether the AI Billing Coverage section has anything to show for these stats. */
 function billingSectionHasContent(stats: UsageAnalysisStats): boolean {
-	const groupCosts = stats.monthBillingGroupCosts;
-	return !!stats.copilotApiBalance || shouldListAccountBudgets(stats.accountBudgets ?? [], !!stats.copilotApiBalance) || (!!groupCosts && Object.keys(groupCosts).length > 0);
+	return !!stats.copilotApiBalance || shouldListAccountBudgets(stats.accountBudgets ?? [], !!stats.copilotApiBalance);
+}
+
+/**
+ * The GitHub › Billing tab. The section holds GitHub API data (credit balance, per-account
+ * budgets), so like the Repository PRs and Cloud Agent tabs it shows a sign-in hint when there is
+ * nothing to display; the section itself stays gated on data presence.
+ */
+function buildBillingTabPanelHtml(stats: UsageAnalysisStats): string {
+	const sectionHtml = safeSectionHtml(localize('usage.billing.title'), () => buildBillingComparisonSectionHtml(stats));
+	const body = billingTabBodyHtml(sectionHtml);
+	return `<div id="tab-panel-billing" class="tab-panel"${activeTab !== 'billing' ? ' style="display:none"' : ''}>${body}</div>`;
 }
 
 function buildBillingComparisonSectionHtml(stats: UsageAnalysisStats): string {
 	if (!billingSectionHasContent(stats)) { return ''; }
 	const api = stats.copilotApiBalance;
 	const groupCosts = stats.monthBillingGroupCosts;
-	const accountsHtml = buildAccountBudgetsHtml(stats.accountBudgets, !!api);
+	const accountsHtml = accountBudgetsHtml(stats.accountBudgets, !!api);
 
 	const copilotCostUsd = groupCosts?.['GitHub Copilot'] ?? 0;
 	const totalCostUsd = groupCosts ? Object.values(groupCosts).reduce((s, v) => s + v, 0) : 0;
 	const nonCopilotCostUsd = totalCostUsd - copilotCostUsd;
 
 	const apiHtml = api ? _billingApiBalanceHtml(api, copilotCostUsd) : '';
-	const extHtml = groupCosts && Object.keys(groupCosts).length > 0 ? billingExtGroupCostsHtml(groupCosts, api) : '';
-	const deltaHtml = _billingCoverageAnalysisHtml(api, copilotCostUsd, nonCopilotCostUsd);
+	const deltaHtml = _billingCoverageAnalysisHtml(api, copilotCostUsd, nonCopilotCostUsd, billingOtherSessionsCostUsd(groupCosts ?? {}, api));
 
 	return `
 		<div class="section" id="section-billing-coverage">
-			<div class="section-title"><span>💳</span><span>AI Billing Coverage</span></div>
-			<div class="section-subtitle">Compare what the GitHub Copilot API reports across all channels with what the extension can track from local IDE session logs, alongside estimated costs from other AI providers.</div>
+			<div class="section-title"><span>💳</span><span>${escapeHtml(localize('usage.billing.title'))}</span></div>
+			<div class="section-subtitle">${escapeHtml(localize('usage.billing.subtitle'))}</div>
 			${apiHtml}
 			<div id="account-budgets">${accountsHtml}</div>
-			${extHtml}
 			${deltaHtml}
+			${billingDetailsLinkHtml()}
 		</div>`;
 }
 
@@ -4441,7 +4479,6 @@ function buildActivityTabPanelHtml(
 	// shape it doesn't expect) renders an inline error card for that section only, instead of
 	// throwing out of this template literal and blanking the entire Activity tab.
 	const modelCostHtml = safeSectionHtml('Model Cost', () => buildModelCostSectionHtml(stats));
-	const billingComparisonHtml = safeSectionHtml('AI Billing Coverage', () => buildBillingComparisonSectionHtml(stats));
 	const modeUsageHtml = safeSectionHtml('Interaction Modes', () => `
 			<div class="section" id="section-interaction-modes">
 				<div class="section-title"><span>🎯</span><span>Interaction Modes</span></div>
@@ -4451,6 +4488,7 @@ function buildActivityTabPanelHtml(
 					${renderModeBarChart(stats.last30Days.modeUsage, '📊 Last 30 Days')}
 				</div>
 			</div>`);
+	const customAgentsHtml = safeSectionHtml('Custom Agents', () => buildCustomAgentsSectionHtml(stats));
 	const contextRefsHtml = safeSectionHtml('Context References', () => buildContextRefsHtml(stats, todayTotalRefs, last30DaysTotalRefs));
 	const modelEfficiencyHtml = safeSectionHtml('Model Efficiency', () => buildModelEfficiencySectionHtml(stats));
 	const contextWindowHtml = safeSectionHtml('Context Window', () => buildContextWindowSectionHtml(stats));
@@ -4464,9 +4502,9 @@ function buildActivityTabPanelHtml(
 			${sessionsSummaryHtml}
 			<!-- Mode Usage Section -->
 			${modeUsageHtml}
+			${customAgentsHtml}
 
 			${sectionGroupHeadingHtml('💵', 'usage.band.spend.title', 'usage.band.spend.subtitle')}
-			${billingComparisonHtml}
 			${modelCostHtml}
 			${multiModelHtml}
 			${modelEfficiencyHtml}
@@ -4475,176 +4513,6 @@ function buildActivityTabPanelHtml(
 			${sectionGroupHeadingHtml('🧠', 'usage.band.context.title', 'usage.band.context.subtitle')}
 			${contextRefsHtml}
 			${contextWindowHtml}
-		</div>`;
-}
-
-// ─── Context window / long-context pricing section ─────────────────────────────
-
-const _modelPricingData = getWindowData<{ pricing: Record<string, ModelPricing> }>('__MODEL_PRICING__');
-const MODEL_PRICING_MAP: Record<string, ModelPricing> = _modelPricingData?.pricing ?? {};
-
-/** Long-context tier info for a set of models — smallest threshold wins. */
-function _tierInfoForModels(models: string[]): { thresholdTokens: number; defaultInputCostPerMillion: number; longContextInputCostPerMillion: number; model: string } | null {
-	let best: { thresholdTokens: number; defaultInputCostPerMillion: number; longContextInputCostPerMillion: number; model: string } | null = null;
-	for (const model of models) {
-		const info = getLongContextInfo(model, MODEL_PRICING_MAP);
-		if (info && (!best || info.thresholdTokens < best.thresholdTokens)) {
-			best = { ...info, model };
-		}
-	}
-	return best;
-}
-
-/** "how much repo fits" estimate: ~4 characters per token, ~40 characters per source line. */
-function _defaultTierCapacityText(thresholdTokens: number): string {
-	const mb = (thresholdTokens * 4) / (1024 * 1024);
-	const lines = Math.round(thresholdTokens / 10 / 1000);
-	return `≈${formatFixed(mb, 1)} MB of code (~${formatNumber(lines)}K lines)`;
-}
-
-function _renderContextWindowBar(maxTokens: number, tier: { thresholdTokens: number; defaultInputCostPerMillion: number; longContextInputCostPerMillion: number; model: string }): string {
-	const pct = (maxTokens / tier.thresholdTokens) * 100;
-	const fillPct = Math.min(pct, 100);
-	const color = pct > 100 ? 'var(--error-color, #f14c4c)' : pct >= 70 ? 'var(--warning-color, #cca700)' : 'var(--success-color, #89d185)';
-	const modelName = escapeHtml(getModelDisplayName(tier.model));
-	const rateNote = `above it, input billing goes $${tier.defaultInputCostPerMillion.toFixed(2)} → $${tier.longContextInputCostPerMillion.toFixed(2)} per 1M tokens`;
-	return `
-		<div style="margin-top: 12px;">
-			<div style="display:flex; justify-content:space-between; font-size:12px; color:var(--text-secondary); margin-bottom:4px;">
-				<span>${formatNumber(maxTokens)} tokens — ${formatFixed(pct, 0)}% of the ${formatNumber(tier.thresholdTokens)}-token default tier for ${modelName}</span>
-				<span>${formatNumber(tier.thresholdTokens)}</span>
-			</div>
-			<div style="height:8px; border-radius:4px; background:var(--border-subtle); overflow:hidden;">
-				<div style="height:100%; width:${formatFixed(fillPct, 0)}%; background:${color}; border-radius:4px;"></div>
-			</div>
-			<div style="font-size:11px; color:var(--text-muted); margin-top:4px;">Default tier fits ${_defaultTierCapacityText(tier.thresholdTokens)}; ${rateNote}.</div>
-		</div>`;
-}
-
-/** One labelled value line inside a context-window period column. */
-function _cwRow(label: string, value: string, subNote?: string, labelTitle?: string): string {
-	const titleAttr = labelTitle ? ` title="${labelTitle}"` : '';
-	return `
-		<div style="margin-bottom: 10px;">
-			<div style="font-size: 12px; font-weight: 600; color: var(--text-secondary); margin-bottom: 2px;"${titleAttr}>${label}</div>
-			<div style="font-size: 13px; color: var(--text-primary);">${value}</div>
-			${subNote ? `<div style="font-size: 11px; color: var(--text-secondary); margin-top: 2px; line-height: 1.4;">${subNote}</div>` : ''}
-		</div>`;
-}
-
-/** Largest-request row for one period column (empty string when the period has none). */
-function _cwLargestRequestRow(cw: ContextWindowStats): string {
-	if (cw.maxRequestInputTokens <= 0) { return ''; }
-	const tier = _tierInfoForModels(cw.maxRequestModels);
-	const modelsLabel = escapeHtml(cw.maxRequestModels.map(m => getModelDisplayName(m)).join(', ') || '—');
-	const thresholdNote = tier
-		? `${formatFixed((cw.maxRequestInputTokens / tier.thresholdTokens) * 100, 0)}% of the ${formatNumber(tier.thresholdTokens)}-token price line · ${modelsLabel}`
-		: `${modelsLabel} — no long-context surcharge for ${cw.maxRequestModels.length > 1 ? 'these models' : 'this model'}`;
-	return _cwRow('📏 Largest request', `${formatNumber(cw.maxRequestInputTokens)} input tokens`, thresholdNote,
-		'The biggest single prompt (input incl. cached tokens) sent to a model in one request during this period');
-}
-
-/** Fullest-CLI-window row for one period column (empty string when unavailable). */
-function _cwFullestWindowRow(cw: ContextWindowStats): string {
-	if ((cw.maxReachedTokens ?? 0) <= 0) { return ''; }
-	const limit = cw.maxReachedWindowLimit;
-	const value = limit
-		? `${formatNumber(cw.maxReachedTokens!)} of ${formatNumber(limit)} (${formatFixed((cw.maxReachedTokens! / limit) * 100, 0)}%)`
-		: formatNumber(cw.maxReachedTokens!);
-	return _cwRow('🪟 Fullest CLI window', value, undefined,
-		'The highest context fill recorded for a Copilot CLI session in this period, versus its window limit');
-}
-
-/** Per-session context-exhaustion rows for one period column (empty when unavailable). */
-function _cwPressureRows(cp: ContextPressureStats | undefined): string {
-	if (!cp) { return ''; }
-	const compactedRow = cp.sessionsConsidered > 0
-		? _cwRow(localize('usage.contextPressure.compactedLabel'),
-			localizeFormat('usage.contextPressure.ofCount', formatNumber(cp.sessionsCompacted), formatNumber(cp.sessionsConsidered)),
-			cp.sessionsCompacted > 0
-				? localizeFormat('usage.contextPressure.compactedShare', formatFixed((cp.sessionsCompacted / cp.sessionsConsidered) * 100, 0))
-				: localize('usage.contextPressure.noneCompacted'),
-			localize('usage.contextPressure.compactedTooltip'))
-		: '';
-	const nearRow = cp.sessionsWithFillData > 0
-		? _cwRow(localize('usage.contextPressure.nearLimitLabel'),
-			localizeFormat('usage.contextPressure.ofCount', formatNumber(cp.sessionsNearLimit), formatNumber(cp.sessionsWithFillData)),
-			cp.worstFillPercent
-				? localizeFormat('usage.contextPressure.worstFill', cp.worstFillPercent)
-				: undefined,
-			localizeFormat('usage.contextPressure.nearLimitTooltip', NEAR_LIMIT_PERCENT))
-		: '';
-	return compactedRow + nearRow;
-}
-
-/** Renders one period column of the context-window section. */
-function renderContextWindowPeriodHtml(cw: ContextWindowStats | undefined, cp?: ContextPressureStats): string {
-	const hasWindowData = hasContextWindowData(cw);
-	const pressureRows = _cwPressureRows(cp);
-	if (!hasWindowData && !pressureRows) { return '<div style="color: var(--text-muted); font-size: 11px;">No data</div>'; }
-	if (!hasWindowData) { return pressureRows; }
-	const tierEntries = Object.entries(cw!.tierCounts);
-	const tierSessionCount = tierEntries.reduce((sum, [, c]) => sum + c, 0);
-	const tierRow = tierEntries.length > 0
-		? _cwRow('🪜 Context tiers', tierEntries.map(([t, c]) => `${escapeHtml(t)} ×${c}`).join(', '),
-			`${tierSessionCount} Copilot CLI session${tierSessionCount === 1 ? '' : 's'} grouped by chosen window size — "default" is the standard window at normal rates; larger tiers unlock more context at long-context prices`,
-			'Copilot CLI lets you pick a context-window tier per session; the count shows how many sessions used each tier')
-		: '';
-	return _cwLargestRequestRow(cw!) + _cwFullestWindowRow(cw!) + tierRow + pressureRows;
-}
-
-function renderAutomaticCompactions(stats: AutomaticCompactionStats | undefined): string {
-	if (!stats) { return ''; }
-	const sources: Array<[string, number]> = [
-		['GitHub Copilot CLI', stats.bySource.copilotCli],
-		['Claude', stats.bySource.claude],
-	];
-	const entries = sources.filter(([, count]) => count > 0)
-		.map(([source, count]) => `${escapeHtml(source)} ×${formatNumber(count)}`);
-	const breakdown = entries.length > 0
-		? entries.join(', ')
-		: 'No automatic compactions detected';
-	return `
-		<h4 class="ctx-window-subheading">${escapeHtml(localize('usage.contextWindow.compactionHeading'))}</h4>
-		<div class="automatic-compactions-card"
-			title="Automatic compactions remove earlier messages to fit the context window and can affect response quality.">
-			<div>
-				<div class="automatic-compactions-label">↩ Automatic compactions (last 7 days)</div>
-				<div class="automatic-compactions-detail">${breakdown}</div>
-			</div>
-			<div class="automatic-compactions-value">${formatNumber(stats.total)}</div>
-		</div>`;
-}
-
-/**
- * Context band section: largest request per period vs the long-context pricing threshold,
- * fullest CLI window, context tiers used, and the automatic compactions that context pressure
- * forced over the last 7 days.
- */
-function buildContextWindowSectionHtml(stats: UsageAnalysisStats): string {
-	const cw30 = stats.last30Days.contextWindow;
-	const tier30 = cw30 && cw30.maxRequestInputTokens > 0 ? _tierInfoForModels(cw30.maxRequestModels) : null;
-	const bar = cw30 && tier30 ? _renderContextWindowBar(cw30.maxRequestInputTokens, tier30) : '';
-	return `
-		<div class="section" id="section-context-window">
-			<div class="section-title"><span>🪟</span><span>Context Window &amp; Long-Context Pricing</span></div>
-			<div class="section-subtitle">How close your largest requests come to the long-context price line. Models with tiered pricing bill higher input rates once a request exceeds their default-tier threshold.</div>
-			<div class="three-column">
-				<div>
-					<h4 style="color: var(--text-primary); font-size: 13px; margin-bottom: 8px;">📅 Today</h4>
-					${renderContextWindowPeriodHtml(stats.today.contextWindow, stats.today.contextPressure)}
-				</div>
-				<div>
-					<h4 style="color: var(--text-primary); font-size: 13px; margin-bottom: 8px;">📆 Last 30 Days</h4>
-					${renderContextWindowPeriodHtml(cw30, stats.last30Days.contextPressure)}
-				</div>
-				<div>
-					<h4 style="color: var(--text-primary); font-size: 13px; margin-bottom: 8px;">📅 Previous Month</h4>
-					${renderContextWindowPeriodHtml(stats.lastMonth.contextWindow, stats.lastMonth.contextPressure)}
-				</div>
-			</div>
-			${bar}
-			${renderAutomaticCompactions(stats.autoCompactionsLast7Days)}
 		</div>`;
 }
 
@@ -4780,7 +4648,7 @@ type EfficiencyMetricKey = 'cost' | 'outputTokens' | 'toolSteps';
 type EfficiencyBubbleMetricKey = 'calls' | EfficiencyMetricKey;
 type EfficiencyColorMode = 'vendor' | 'model';
 type EfficiencyRow = { model: string; counters: ModelEfficiencyCounters; rates: ReturnType<typeof deriveModelEfficiencyRates> };
-type EfficiencySortColumn = 'model' | 'calls' | 'oneShotRate' | 'retryRate' | 'selfCorrectionRate' | 'costPerCall' | 'outputTokensPerCall' | 'toolCallsPerCall' | 'cacheHitRate';
+type EfficiencySortColumn = 'model' | 'calls' | 'oneShotRate' | 'retryRate' | 'selfCorrectionRate' | 'costPerCall' | 'outputTokensPerCall' | 'toolCallsPerCall' | 'cacheHitRate' | 'freshInputTokensPerCall';
 
 const EFFICIENCY_PERIOD_TO_DATA_KEY: Partial<Record<Period, EfficiencyPeriodKey>> = {
 	today: 'today',
@@ -4865,6 +4733,7 @@ const EFFICIENCY_COLUMN_DEFS: EfficiencyColumnDef[] = [
 	{ sortKey: 'outputTokensPerCall', label: 'Out tok', title: 'Average output tokens per user-request turn', sortValue: row => row.rates.outputTokensPerCall, render: row => row.rates.outputTokensPerCall === null ? '—' : formatCompact(Math.round(row.rates.outputTokensPerCall)) },
 	{ sortKey: 'toolCallsPerCall', label: 'Steps', title: 'Average tool invocations per user-request turn', sortValue: row => row.rates.toolCallsPerCall, render: row => formatPerTurn(row.rates.toolCallsPerCall) },
 	{ sortKey: 'cacheHitRate', label: 'Cache hit', title: 'Cache-read share of input tokens', sortValue: row => row.rates.cacheHitRate, render: row => formatRatePercent(row.rates.cacheHitRate) },
+	{ sortKey: 'freshInputTokensPerCall', label: localize('usage.efficiency.freshInput.label'), title: localize('usage.efficiency.freshInput.title'), sortValue: row => row.rates.freshInputTokensPerCall, render: row => row.rates.freshInputTokensPerCall === null ? '—' : `${row.rates.cacheReadsReported ? '' : '≤'}${formatCompact(Math.round(row.rates.freshInputTokensPerCall))}` },
 ];
 
 /** Rows by descending local use: the leaderboard's default order and the chart's input. */
@@ -5179,13 +5048,7 @@ function setupModelEfficiencySection(): void {
 	});
 }
 
-function buildToolsTabPanelHtml(
-	stats: UsageAnalysisStats,
-	allHighCostModels: string[],
-	allLowCostModels: string[],
-	allMediumCostModels: string[],
-	allUnknownModels: string[],
-): string {
+function buildToolsTabPanelHtml(stats: UsageAnalysisStats): string {
 	return `
 		<div id="tab-panel-tools" class="tab-panel"${activeTab !== 'tools' ? ' style="display:none"' : ''}>
 			<!-- Tool Calls Section -->
@@ -5211,21 +5074,8 @@ function buildToolsTabPanelHtml(
 			</div>
 
 			${safeSectionHtml(localize('usage.tab.tools'), () => buildToolExecutionSectionsHtml({ toolCalls: stats.last30Days.toolCalls, mcpTools: stats.last30Days.mcpTools, resolveToolName: lookupToolName, hiddenTools: hideAutomaticToolCalls ? AUTOMATIC_TOOL_SET_WV : undefined }))}
+			${safeSectionHtml(localize('usage.toolExec.families.title'), () => buildToolFamilySectionHtml({ toolCalls: stats.last30Days.toolCalls, families: stats.toolFamilies ?? [], resolveToolName: lookupToolName, hiddenTools: hideAutomaticToolCalls ? AUTOMATIC_TOOL_SET_WV : undefined }))}
 			${buildMcpToolsSectionHtml(stats)}
-			${buildCurationSectionHtml(currentCurationAnalysis ?? stats.curationAnalysis)}
-			${buildMemoryFilesSectionHtml(currentMemoryFilesAnalysis ?? stats.memoryFilesAnalysis)}
-			${buildServerMemoriesSectionHtml(currentServerMemoriesAnalysis ?? stats.serverMemoriesAnalysis)}
-			${buildSkillSuggestionsSectionHtml(stats.repeatedTasks ?? null)}
-			<!-- Multi-Model Usage Section -->
-			<div class="section" id="section-multi-model">
-				<div class="section-title"><span>🔀</span><span>Multi-Model Usage</span></div>
-				<div class="section-subtitle">Track model diversity and switching patterns in your conversations</div>
-				<div class="three-column">
-					${renderMultiModelPeriod('📅 Today', stats.today.modelSwitching, allLowCostModels, allMediumCostModels, allHighCostModels, allUnknownModels)}
-					${renderMultiModelPeriod('📆 Last 30 Days', stats.last30Days.modelSwitching, allLowCostModels, allMediumCostModels, allHighCostModels, allUnknownModels)}
-					${renderMultiModelPeriod('📅 Previous Month', stats.month.modelSwitching, allLowCostModels, allMediumCostModels, allHighCostModels, allUnknownModels)}
-				</div>
-			</div>
 		</div>`;
 }
 
@@ -5304,6 +5154,17 @@ function renderLayout(stats: UsageAnalysisStats): void {
 	const todayTotalRefs = getTotalContextRefs(stats.today.contextReferences);
 	const last30DaysTotalRefs = getTotalContextRefs(stats.last30Days.contextReferences);
 	const thinkingEffortHtml = safeSectionHtml('Thinking Effort', () => buildThinkingEffortSectionHtml(stats));
+	const multiModelHtml = safeSectionHtml('Multi-Model Usage', () => `
+		<!-- Multi-Model Usage Section -->
+		<div class="section" id="section-multi-model">
+			<div class="section-title"><span>🔀</span><span>Multi-Model Usage</span></div>
+			<div class="section-subtitle">Track model diversity and switching patterns in your conversations</div>
+			<div class="three-column">
+				${renderMultiModelPeriod('📅 Today', stats.today.modelSwitching, allKeys.allLowCostModels, allKeys.allMediumCostModels, allKeys.allHighCostModels, allKeys.allUnknownModels)}
+				${renderMultiModelPeriod('📆 Last 30 Days', stats.last30Days.modelSwitching, allKeys.allLowCostModels, allKeys.allMediumCostModels, allKeys.allHighCostModels, allKeys.allUnknownModels)}
+				${renderMultiModelPeriod(`📅 ${escapeHtml(localize('usage.toolPeriod.colPreviousMonth'))}`, stats.lastMonth.modelSwitching, allKeys.allLowCostModels, allKeys.allMediumCostModels, allKeys.allHighCostModels, allKeys.allUnknownModels)}
+			</div>
+		</div>${buildRouterSectionHtml(stats.hydraFusion)}`);
 	const sessionsSummaryHtml = `
 		<!-- Summary Section -->
 		<div class="section" id="section-sessions-summary">
@@ -5319,15 +5180,11 @@ function renderLayout(stats: UsageAnalysisStats): void {
 	const rendered = assignUsageRootHtml(root, () => buildUsageRootHtml(
 		stats,
 		customizationHtml,
-		'',
+		multiModelHtml,
 		thinkingEffortHtml,
 		sessionsSummaryHtml,
 		todayTotalRefs,
 		last30DaysTotalRefs,
-		allKeys.allHighCostModels,
-		allKeys.allLowCostModels,
-		allKeys.allMediumCostModels,
-		allKeys.allUnknownModels,
 	));
 	if (!rendered) { return; }
 
@@ -5344,6 +5201,7 @@ function renderLayout(stats: UsageAnalysisStats): void {
 	// replay would iterate an empty array and silently mark nothing.
 	currentInsights = stats.insights ?? [];
 	setupTabs();
+	wireGitHubActivityRefresh();
 	darkFactoryTab.attach();
 	setupModelEfficiencySection();
 	setupContextRefSection();
@@ -5414,6 +5272,9 @@ function wireNavigationButtons(): void {
 	document.getElementById('btn-details')?.addEventListener('click', () => {
 		vscode.postMessage({ command: 'showDetails' });
 	});
+	document.getElementById(BILLING_DETAILS_BUTTON_ID)?.addEventListener('click', () => {
+		vscode.postMessage({ command: 'showDetails' });
+	});
 	document.getElementById('btn-chart')?.addEventListener('click', () => {
 		vscode.postMessage({ command: 'showChart' });
 	});
@@ -5428,6 +5289,9 @@ function wireNavigationButtons(): void {
 	});
 	document.getElementById('btn-environmental')?.addEventListener('click', () => {
 		vscode.postMessage({ command: 'showEnvironmental' });
+	});
+	document.getElementById('btn-open-tool-families-settings')?.addEventListener('click', () => {
+		vscode.postMessage({ command: 'openToolFamiliesSettings' });
 	});
 	document.getElementById('btn-efficiency')?.addEventListener('click', () => {
 		vscode.postMessage({ command: 'showEfficiency' });
@@ -5549,7 +5413,7 @@ function handleUpdateStats(message: any): void {
 	}
 	const sanitized = sanitizeStats(message.data);
 	if (sanitized) {
-		_ulLoadingActive = false;
+		markUsageLoadingInactive();
 		if (!Object.prototype.hasOwnProperty.call(message.data ?? {}, 'correctionReport')) {
 			sanitized.correctionReport = currentCorrectionReport;
 		}
@@ -5578,7 +5442,7 @@ function handleUpdateAccountBudgets(message: { accountBudgets?: unknown; copilot
 	const accounts = sanitizeAccountBudgets(message.accountBudgets);
 	const container = document.getElementById('account-budgets');
 	if (!lastRenderedStats) {
-		if (container) { setHtml(container, buildAccountBudgetsHtml(accounts, true)); }
+		if (container) { setHtml(container, accountBudgetsHtml(accounts, true)); }
 		return;
 	}
 	const wasShown = billingSectionHasContent(lastRenderedStats);
@@ -5596,7 +5460,7 @@ function handleUpdateAccountBudgets(message: { accountBudgets?: unknown; copilot
 		renderLayout(lastRenderedStats);
 		setupSessionsTableHandlers();
 	} else if (container) {
-		setHtml(container, buildAccountBudgetsHtml(accounts, !!lastRenderedStats.copilotApiBalance));
+		setHtml(container, accountBudgetsHtml(accounts, !!lastRenderedStats.copilotApiBalance));
 	}
 }
 
@@ -5614,19 +5478,9 @@ function handleToolSuppressed(toolName: string): void {
 	}
 }
 
-function handleHighlightUnknownTools(): void {
-	clearFocusedInsightAnchor();
-	activateUsageTab('tools');
-	const el = document.getElementById('unknown-mcp-tools-section');
-	if (el) {
-		el.scrollIntoView({ behavior: preferredScrollBehavior(), block: 'center' });
-		flashAnchorHighlight(el);
-	}
-}
-
 function handleRepoPrStatsLoaded(data: any): void {
 	repoPrStatsData = sanitizeRepoPrStatsData(data);
-	if (!repoPrStatsData.authenticated) { repoPrStatsLoaded = false; }
+	if (isEmptyActivitySnapshot(repoPrStatsData)) { repoPrStatsLoaded = false; }
 	// Only the failure is worth a log line: a successful render is visible in the panel, but a
 	// payload that arrives and renders nothing looks identical to one that never arrived.
 	if (!updateReposPrPanel(repoPrStatsData)) {
@@ -5640,7 +5494,7 @@ function handleRepoPrStatsLoaded(data: any): void {
 function handleAgentSessionsLoaded(data: any): void {
 	if (!data || typeof data !== 'object') { return; }
 	agentSessionsData = sanitizeAgentSessionsData(data);
-	if (!agentSessionsData.authenticated) { agentSessionsLoaded = false; }
+	if (isEmptyActivitySnapshot(agentSessionsData)) { agentSessionsLoaded = false; }
 	if (!updateAgentSessionsPanel(agentSessionsData)) {
 		traceToHost('agentSessionsLoaded.notRendered', { authenticated: agentSessionsData.authenticated });
 	}
@@ -5658,7 +5512,7 @@ function handleLoadingStateMessage(message: any): boolean {
 			updateUsageLoadingProgress(message); return true;
 		case 'usageRefreshing':
 			clearLoadingTimeout();
-			_ulLastStepIdx = 0;
+			resetUsageLoadingSteps();
 			darkFactoryTab.invalidate();
 			renderUsageLoadingState('Refreshing Usage Analysis');
 			return true;
@@ -5709,8 +5563,6 @@ function handleExtensionMessage(message: any): void {
 			handleUpdateStats(message); break;
 		case 'toolSuppressed':
 			handleToolSuppressed(message.toolName as string); break;
-		case 'highlightUnknownTools':
-			handleHighlightUnknownTools(); break;
 		case 'repoPrStatsLoaded':
 			handleRepoPrStatsLoaded(message.data); break;
 		case 'repoPrStatsProgress':
@@ -6494,6 +6346,13 @@ async function bootstrap(): Promise<void> {
 	// cache that predates newer counts (e.g. escalatedUserCorrections) — normalize it the same way.
 	if (Object.prototype.hasOwnProperty.call(initialData, 'correctionReport')) {
 		initialData.correctionReport = sanitizeCorrectionReport(initialData.correctionReport);
+	}
+	// Same for missedPotential: a malformed row (null, non-object, no workspacePath) must be
+	// dropped here too, or it crashes the Workspace Health / Missed Potential renderers.
+	if (Object.prototype.hasOwnProperty.call(initialData, 'missedPotential')) {
+		const holder: UsageAnalysisStats = { missedPotential: undefined } as unknown as UsageAnalysisStats;
+		_applyMissedPotential(holder, initialData);
+		initialData.missedPotential = holder.missedPotential ?? [];
 	}
 	renderLayout(initialData);
 	setupSessionsTableHandlers();

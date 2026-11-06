@@ -31,7 +31,7 @@ Requires **Node.js 22.14 or later**. The first run parses every session file it 
 | [`usage`](#usage--token-usage-report) | Tokens per period, per editor, per model, cost | `-m, --models`, `-c, --cost`, `--json` |
 | [`environmental`](#environmental--environmental-impact) (alias `env`) | CO₂, water and tree estimates | — |
 | [`fluency`](#fluency--fluency-score) | Fluency score per category | `-t, --tips`, `--json` |
-| [`diagnostics`](#diagnostics--search-locations--stats) | Every search location and what was found there | — |
+| [`diagnostics`](#diagnostics--search-locations--stats) | Every search location and what was found there | `--json` |
 | [`memory-files`](#memory-files--copilot-memory-files-hygiene-report) | Copilot agent memory-file hygiene | `--json`, `--stale-days`, `--large-kb`, `--server`, `--repo`, `--limit`, `--promote` |
 | [`curation`](#curation--tool-curation-report) | MCP servers and skills you load but don't use | `--json`, `--window` |
 | [`skill-suggestions`](#skill-suggestions--repeated-tasks) | Tasks you keep prompting for by hand (skill candidates) | `--json`, `--include-prompts` |
@@ -206,7 +206,10 @@ Every location searched for session files, whether it exists on this machine, an
 
 ```bash
 ai-engineering-fluency diagnostics
+ai-engineering-fluency diagnostics --json    # The Diagnostics view payload, built by the shared buildDiagnosticsViewData()
 ```
+
+`--json` emits the same payload shape the extension and desktop app give their Diagnostics view. State only VS Code has (backend sync, quota, budgets, per-editor skill counts) and the per-session detail table are reported as empty/`null`: not available in the CLI.
 
 ```
 🔬 Copilot Token Tracker - Diagnostics
@@ -378,7 +381,7 @@ These print the JSON payloads that the editor front-ends render — the Visual S
 | Command | Output |
 |---|---|
 | `chart --json` | Daily token usage (labels, per-day totals, per-editor/model series). `-v, --verbose` logs debug-log discovery details to stderr. Without `--json` it prints a per-period token and cost summary. |
-| `usage-analysis --json` | Usage analysis per period: interaction modes, tool calls, MCP usage, context references. `--json` is required. `--repeated-tasks` adds the `repeatedTasks` report (the [`skill-suggestions`](#skill-suggestions--repeated-tasks) data, prompts included); it is left out by default because it carries prompt text. |
+| `usage-analysis --json` | The VS Code extension's Usage Analysis view payload, built by the same shared `buildUsageAnalysisViewData()`: usage per period (interaction modes, tool calls, MCP usage, context references), the workspace customization matrix (one *Instructions* column — the CLI checks for AGENTS.md, CLAUDE.md and `.github/copilot-instructions.md` rather than running the extension's full scan, so `missedPotential` is always empty), tool curation for the current directory's `.vscode/mcp.json` and skills plus user-level skills, and the evaluated insight cards (all `new`: the CLI keeps no insight state). `--json` is required. `--repeated-tasks` adds the `repeatedTasks` report (the [`skill-suggestions`](#skill-suggestions--repeated-tasks) data, prompts included); it is left out by default because it carries prompt text. |
 | `all --json` | One object with `details`, `chart`, `usage`, `fluency` and `curation` keys — the payloads of `usage --json`, `chart --json`, `usage-analysis --json`, `fluency --json` and `curation --json`. `--json` is required; without it the command prints a hint to stderr and exits. |
 
 ---
@@ -464,7 +467,7 @@ Run `ai-engineering-fluency diagnostics` to see exactly which of these locations
 
 ## Scripting and JSON output
 
-- With `--json`, progress output is suppressed and the result is written to **stdout** as a single JSON document, so `ai-engineering-fluency usage --json > usage.json` is safe. Errors go to **stderr**.
+- With `--json`, progress output is suppressed and the result is written to **stdout** as a single JSON document, so `ai-engineering-fluency usage --json > usage.json` is safe. Errors and diagnostic log lines (such as a skipped oversized session file) go to **stderr**.
 - Token counts are plain numbers; the `…Formatted` fields in `segment --json` are display strings.
 - `stats --json`, `segment --json` and `memory-files --json` have small, documented shapes (above) that are intended for scripts. The integration payloads (`chart`, `usage-analysis`, `all`, and the `usage` / `fluency` payloads) mirror the extension's views and can change between releases — pin the package version if you depend on them.
 - Exit code is `0` on success, including when no sessions are found (the JSON is then an empty object or empty payload), and when a `memory-files --json --server` read fails (see `serverMemories.error`). It is `1` when `memory-files --promote` cannot read the server memories, and on any unexpected error, which is printed to stderr.

@@ -113,8 +113,14 @@ export const WHATS_NEW_MAX_ANNOUNCEMENT_AGE_DAYS = 60;
  */
 export const WHATS_NEW_RELEASES: readonly WhatsNewRelease[] = [
 	{
-		version: '0.19.1',
+		version: '0.19.2',
 		date: null,
+		headlineKey: 'whatsNew.release.0.19.2.headline',
+		features: [],
+	},
+	{
+		version: '0.19.1',
+		date: '2026-10-27',
 		headlineKey: 'whatsNew.release.0.19.1.headline',
 		features: [
 			{
@@ -183,7 +189,7 @@ export const WHATS_NEW_RELEASES: readonly WhatsNewRelease[] = [
 				titleKey: 'whatsNew.feature.usage.memory-files-hygiene.title',
 				descriptionKey: 'whatsNew.feature.usage.memory-files-hygiene.description',
 				kind: 'section',
-				surface: { view: 'usage', tab: 'tools', anchor: 'section-memory-files' },
+				surface: { view: 'usage', tab: 'health', anchor: 'section-memory-files' },
 			},
 			{
 				id: 'logviewer.hydrafusion-routing',
@@ -204,14 +210,14 @@ export const WHATS_NEW_RELEASES: readonly WhatsNewRelease[] = [
 				titleKey: 'whatsNew.feature.usage.skill-suggestions.title',
 				descriptionKey: 'whatsNew.feature.usage.skill-suggestions.description',
 				kind: 'section',
-				surface: { view: 'usage', tab: 'tools', anchor: 'section-skill-suggestions' },
+				surface: { view: 'usage', tab: 'insights', anchor: 'section-skill-suggestions' },
 			},
 			{
 				id: 'diagnostics.ttft-tab',
 				titleKey: 'whatsNew.feature.diagnostics.ttft-tab.title',
 				descriptionKey: 'whatsNew.feature.diagnostics.ttft-tab.description',
 				kind: 'tab',
-				surface: { view: 'diagnostics', tab: 'ttft' },
+				surface: { view: 'efficiency', tab: 'ttft' },
 			},
 			{
 				// Listed last on purpose: the per-release cap means this is never

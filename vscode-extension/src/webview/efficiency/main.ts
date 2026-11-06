@@ -28,7 +28,9 @@ import type {
 	ModelComparisonRow,
 	ModelCompareSelection,
 	ModelCompareWindowId,
+	ModelCostBasis,
 	ModelPeriodMetrics,
+	ModelSessionFilter,
 	SkillImpact,
 	SkillUsageTrends,
 } from '../../../../src/efficiencyAnalysis';
@@ -37,14 +39,19 @@ import {
 	buildEfficiencyBuckets,
 	buildEfficiencyBucketSeries,
 	buildModelBucketSeries,
+	buildSkillUsageRows,
 	buildSkillUsageSeries,
+	DEFAULT_MODEL_SESSION_FILTER,
+	compareModelAcrossHarnesses,
 	compareModels,
 	computeModelPeriodMetrics,
+	computeOutlierCutoffTokens,
 	computeSkillImpact,
+	MIN_SESSION_SHARE_FOR_COMPARE,
 	efficiencyTodayKey,
-	filterModelsByVendor,
 	filterSessionsByEditor,
 	listComparableModels,
+	listModelHarnesses,
 	listModelVendors,
 	resolveEfficiencyRange,
 	resolveModelCompareWindow,
@@ -76,8 +83,16 @@ import { applyWebviewLocale } from '../shared/webviewLocale';
 import { registerMessageHandler } from '../shared/messageHandler';
 import { createEfficiencyWebviewReadyNotifier, isValueSignalsPayload } from './valueUpdate';
 import { renderModelMixTable } from './modelMixTable';
-import { fmtValue, renderModelComparisonTable, renderSkillImpactTable } from './efficiencyTables';
+import { fmtValue, renderModelComparisonTable, renderSkillImpactTable, renderSkillUsageTable } from './efficiencyTables';
+import { currentTtftSelection, handleTtftResult, renderTtftTab, restoreTtftSelection, wireTtftTab, type TtftResultMessage, type TtftSelection } from './ttftTab';
 import { buildAttributionTooltip } from './attributionText';
+import {
+	BUCKET_DETAIL_ID, BUCKET_DRILL_BUTTON_ID, BUCKET_PICK_ID, bucketPickerHtml, deltaContextButtonHtml, renderBucketDetail,
+	renderBucketDetailPlaceholder, renderModelBucketDetail, renderSkillBucketDetail,
+} from './bucketDetail';
+import { computeVerdict } from './verdict';
+import { buildBucketDetail, buildModelBucketDetail, buildSkillBucketDetail } from '../../../../src/efficiencyBucketDetail';
+import { getModelDisplayName } from '../../../../src/webview/shared/modelUtils';
 import { installSurfaceNavigation } from '../shared/surfaceNavigation';
 
 // Minimal structural types for the dynamically imported Chart.js bundle —
@@ -112,12 +127,13 @@ async function loadChartModule(): Promise<void> {
 	Chart = mod.default as ChartConstructor;
 }
 
-type TabId = 'trends' | 'skills' | 'deltas' | 'attribution' | 'cache' | 'models' | 'value' | 'combined';
+type TabId = 'trends' | 'skills' | 'ttft' | 'deltas' | 'attribution' | 'cache' | 'models' | 'value' | 'combined';
 let activeTab: TabId = 'trends';
 
-const TABS: { id: TabId; label: string }[] = [
+const TABS: { id: TabId; label: string; labelKey?: string }[] = [
 	{ id: 'trends', label: '📈 Trends' },
-	{ id: 'skills', label: '🛠️ Tools & Skills' },
+	{ id: 'skills', label: '🛠️ Skills', labelKey: 'efficiency.tab.skills' },
+	{ id: 'ttft', label: '⏱️ TTFT', labelKey: 'efficiency.tab.ttft' },
 	{ id: 'deltas', label: '🗓️ Month vs Month' },
 	{ id: 'attribution', label: '💸 Cost Attribution' },
 	{ id: 'cache', label: '⚡ Prompt Cache' },
@@ -128,10 +144,11 @@ const TABS: { id: TabId; label: string }[] = [
 
 /**
  * Tabs to show for this dataset. The Prompt Cache tab only exists when there is
- * cache-breakage data to put in it (Claude Code / Claude Desktop sessions).
+ * cache-breakage data to put in it (Claude Code / Claude Desktop sessions), and the
+ * TTFT tab only on a host that can answer its scan request.
  */
-function visibleTabs(d: EfficiencyViewData): { id: TabId; label: string }[] {
-	return TABS.filter(t => t.id !== 'cache' || d.cacheBreakage);
+function visibleTabs(d: EfficiencyViewData): { id: TabId; label: string; labelKey?: string }[] {
+	return TABS.filter(t => (t.id !== 'cache' || d.cacheBreakage) && (t.id !== 'ttft' || d.ttftAvailable));
 }
 
 
@@ -164,6 +181,7 @@ const SCOPE_POLICY: Partial<Record<TabId, { editor: boolean; vendor: boolean; be
 interface EfficiencyPersistedState extends Record<string, unknown> {
 	activeTab: TabId;
 	scope: EfficiencyScopeState;
+	ttft?: TtftSelection;
 }
 
 const viewStateManager = createViewStateManager<EfficiencyPersistedState>(
@@ -176,11 +194,12 @@ let scope: EfficiencyScopeState = defaultScopeState();
 function restorePersistedState(): void {
 	const saved = viewStateManager.restore();
 	scope = normalizeScopeState(saved.scope);
+	restoreTtftSelection(saved.ttft);
 	if (TABS.some(t => t.id === saved.activeTab)) { activeTab = saved.activeTab; }
 }
 
 function persistState(): void {
-	viewStateManager.patch({ activeTab, scope });
+	viewStateManager.patch({ activeTab, scope, ttft: currentTtftSelection() });
 }
 
 /** The reference "now" for range maths — the moment the extension built this payload. */
@@ -274,6 +293,8 @@ function computeScopedData(d: EfficiencyViewData): ScopedData {
 
 /** Model day rows scoped to the selected editor. */
 function scopedModelDaily(d: EfficiencyViewData): typeof d.modelDaily {
+	// `harnesses` mode picks its own two editors, so the toolbar's editor scope must not narrow the rows.
+	if (modelState.mode === 'harnesses') { return d.modelDaily; }
 	return selectModelDaysForEditor(d.modelDaily, scope.editor || undefined);
 }
 
@@ -354,69 +375,156 @@ function vendorSelectHtml(d: EfficiencyViewData): string {
 	return selectHtml('eff-vendor', options, scope.vendor);
 }
 
-/**
- * The toolbar above a scoped chart: time presets, resolution, the drill-down
- * chip and its Back action, plus whichever categorical filters this tab is
- * allowed to carry. Every control is a real `<button>`/`<select>`, so the whole
- * toolbar is keyboard reachable, and the live region announces the resulting
- * scope to a screen reader after each change.
- */
-function renderScopeToolbar(d: EfficiencyViewData, s: ScopedData): string {
-	const policy = SCOPE_POLICY[activeTab];
-	if (!policy || !s.supported) { return ''; }
-	const drill = isDrilled(scope)
-		? `<span class="scope-chip">🔍 ${escapeHtml(s.range.label)}<button type="button" id="eff-drill-back" class="scope-back" aria-label="${escapeHtml(localize('efficiency.scope.backAria'))}">${escapeHtml(localize('efficiency.scope.back'))}</button></span>`
-		: canDrillInto(s.resolution)
-			? `<span class="scope-hint">${escapeHtml(localize(`efficiency.scope.drillHint${s.resolution === 'weekly' ? 'Weekly' : 'Monthly'}`))}</span>`
-			: '';
+type ScopePolicy = NonNullable<(typeof SCOPE_POLICY)[TabId]>;
+
+/** `harnesses` mode picks its own two editors (see {@link scopedModelDaily}), so the Editor filter would change nothing there. */
+function editorFilterApplies(policy: ScopePolicy): boolean {
+	return policy.editor && !(activeTab === 'models' && modelState.mode === 'harnesses');
+}
+
+function scopeTimeControlsHtml(d: EfficiencyViewData): string {
+	return `${rangeButtonsHtml()}
+			<label class="scope-field">${escapeHtml(localize('efficiency.resolution.label'))} ${resolutionSelectHtml(d)}</label>`;
+}
+
+function scopeFilterControlsHtml(d: EfficiencyViewData, s: ScopedData, policy: ScopePolicy): string {
+	return `${editorFilterApplies(policy) ? `<label class="scope-field">${escapeHtml(localize('efficiency.scope.editorLabel'))} ${editorSelectHtml(d, s)}</label>` : ''}
+			${policy.vendor ? `<label class="scope-field">${escapeHtml(localize('efficiency.scope.vendorLabel'))} ${vendorSelectHtml(d)}</label>` : ''}`;
+}
+
+/** The drill-down chip and its Back action; otherwise a pointer at the Selected period control, where that control exists. */
+function drillStatusHtml(s: ScopedData, withPeriodHint: boolean): string {
+	if (isDrilled(scope)) {
+		return `<span class="scope-chip">🔍 ${escapeHtml(s.range.label)}<button type="button" id="eff-drill-back" class="scope-back" aria-label="${escapeHtml(localize('efficiency.scope.backAria'))}">${escapeHtml(localize('efficiency.scope.back'))}</button></span>`;
+	}
+	return withPeriodHint && canDrillInto(s.resolution) && s.buckets.length > 0
+		? `<span class="scope-hint">${escapeHtml(localize(`efficiency.scope.drillHint${s.resolution === 'weekly' ? 'Weekly' : 'Monthly'}`))}</span>`
+		: '';
+}
+
+function scopeAnnouncementHtml(s: ScopedData, policy: ScopePolicy): string {
 	// The vendor filter only applies on Models; announcing it elsewhere would
-	// tell a screen-reader user the chart is scoped in a way it is not.
-	const announcement = describeScope(scope, {
+	// tell a screen-reader user the chart is scoped in a way it is not. The same
+	// goes for an editor filter that `harnesses` mode ignores.
+	const announcement = describeScope(editorFilterApplies(policy) ? scope : { ...scope, editor: '' }, {
 		range: rangeLabel(s),
 		resolution: resolutionLabel(s.resolution),
 		allEditors: localize('efficiency.scope.allEditors'),
 		allVendors: localize('efficiency.scope.allVendors'),
 		includeVendor: policy.vendor,
 	});
+	return `<p class="scope-announce" role="status" aria-live="polite">${escapeHtml(localizeFormat('efficiency.scope.announce', announcement))}</p>`;
+}
+
+function editorScopedCaveatHtml(policy: ScopePolicy): string {
+	return scope.editor && editorFilterApplies(policy)
+		? `<p class="scope-caveat">${escapeHtml(localizeFormat('efficiency.scope.editorScoped', scope.editor))}</p>`
+		: '';
+}
+
+/**
+ * The toolbar above a scoped chart: time presets, resolution, the drill-down
+ * chip and its Back action, plus whichever categorical filters this tab is
+ * allowed to carry. Every control is a real `<button>`/`<select>`, so the whole
+ * toolbar is keyboard reachable, and the live region announces the resulting
+ * scope to a screen reader after each change.
+ *
+ * Models splits these up instead: see {@link renderModelsFilterBar} and
+ * {@link renderDriftScopeBar}.
+ */
+function renderScopeToolbar(d: EfficiencyViewData, s: ScopedData, withPeriodHint = true): string {
+	const policy = SCOPE_POLICY[activeTab];
+	if (!policy || !s.supported) { return ''; }
 	return `
 		<div class="scope-toolbar">
-			${rangeButtonsHtml()}
-			<label class="scope-field">${escapeHtml(localize('efficiency.resolution.label'))} ${resolutionSelectHtml(d)}</label>
-			${policy.editor ? `<label class="scope-field">${escapeHtml(localize('efficiency.scope.editorLabel'))} ${editorSelectHtml(d, s)}</label>` : ''}
-			${policy.vendor ? `<label class="scope-field">${escapeHtml(localize('efficiency.scope.vendorLabel'))} ${vendorSelectHtml(d)}</label>` : ''}
-			${drillSelectHtml(s)}
-			${drill}
+			${scopeTimeControlsHtml(d)}
+			${scopeFilterControlsHtml(d, s, policy)}
+			${drillStatusHtml(s, withPeriodHint)}
 		</div>
-		<p class="scope-announce" role="status" aria-live="polite">${escapeHtml(localizeFormat('efficiency.scope.announce', announcement))}</p>
+		${scopeAnnouncementHtml(s, policy)}
 		${s.behaviorGap && policy.behavioral ? `<p class="scope-caveat">${escapeHtml(localizeFormat('efficiency.scope.behaviorGap', Math.round((d.behaviorWindowDays ?? 84) / 7)))}</p>` : ''}
-		${scope.editor ? `<p class="scope-caveat">${escapeHtml(localizeFormat('efficiency.scope.editorScoped', scope.editor))}</p>` : ''}`;
+		${editorScopedCaveatHtml(policy)}`;
+}
+
+/** The Models filters that narrow both the head-to-head and the drift chart. */
+function renderModelsFilterBar(d: EfficiencyViewData, s: ScopedData): string {
+	const policy = SCOPE_POLICY.models;
+	if (!policy || !s.supported) { return ''; }
+	return `
+		<div class="scope-toolbar">${scopeFilterControlsHtml(d, s, policy)}</div>
+		${editorScopedCaveatHtml(policy)}`;
+}
+
+/** The time controls on Models, kept with the drift chart because nothing else on the tab reads them. */
+function renderDriftScopeBar(d: EfficiencyViewData, s: ScopedData): string {
+	const policy = SCOPE_POLICY.models;
+	if (!policy || !s.supported) { return ''; }
+	return `
+		<div class="scope-toolbar">
+			${scopeTimeControlsHtml(d)}
+			${drillStatusHtml(s, true)}
+		</div>
+		${scopeAnnouncementHtml(s, policy)}`;
 }
 
 /** Shape Chart.js hands the click handler for the element under the cursor. */
 type ChartClickElement = { index: number };
 
 /**
- * Turns a click on an aggregated data point into a drill-down into the days it
- * contains. Returns undefined when the series is already daily, so Chart.js is
- * not given a handler that would do nothing.
+ * Turns a click on a data point into selecting that period, which opens its
+ * detail region. Drilling into the days is a separate, explicit button in that
+ * region, so a click never silently rewrites the chart's range.
  */
 function drillClickHandler(s: ScopedData): ((event: unknown, elements: ChartClickElement[]) => void) | undefined {
-	if (!s.supported || !canDrillInto(s.resolution)) { return undefined; }
+	if (!s.supported) { return undefined; }
 	return (_event, elements) => {
 		const bucket = elements.length > 0 ? s.buckets[elements[0].index] : undefined;
-		if (bucket) { applyScope(drillInto(scope, bucket)); }
+		if (!bucket) { return; }
+		selectBucket(s, bucket.key, false);
+		// A lower Trends card can be well below the region that just opened.
+		document.getElementById(BUCKET_DETAIL_ID)?.scrollIntoView?.({ block: 'nearest' });
 	};
 }
 
-/**
- * Keyboard/screen-reader equivalent of clicking a data point. A `<canvas>` is
- * not focusable and its points are not in the accessibility tree, so without
- * this the drill-down would be mouse-only.
- */
-function drillSelectHtml(s: ScopedData): string {
-	if (!canDrillInto(s.resolution) || s.buckets.length === 0) { return ''; }
-	const options = [{ value: '', label: localize('efficiency.scope.drillPlaceholder') }, ...s.buckets.map(b => ({ value: b.key, label: b.label }))];
-	return `<label class="scope-field">${escapeHtml(localize('efficiency.scope.drillLabel'))} ${selectHtml('eff-drill-pick', options, '')}</label>`;
+// ── Selected-period drill-down ─────────────────────────────────────────
+/** The selected period; paired with its resolution so a key from one width never selects a different bucket at another. */
+let selectedBucket: { resolution: EfficiencyBucketResolution; key: string } | null = null;
+
+function selectedBucketIndex(s: ScopedData): number {
+	if (!selectedBucket || selectedBucket.resolution !== s.resolution) { return -1; }
+	return s.buckets.findIndex(b => b.key === selectedBucket?.key);
+}
+
+function selectBucket(s: ScopedData, key: string, focusPicker: boolean): void {
+	selectedBucket = key ? { resolution: s.resolution, key } : null;
+	render();
+	if (focusPicker) { document.getElementById(BUCKET_PICK_ID)?.focus(); }
+}
+
+/** Picker plus live detail region for the active tab; empty when the scope cannot carry buckets. */
+function renderBucketSection(d: EfficiencyViewData, s: ScopedData, tab: 'trends' | 'combined' | 'skills' | 'models'): string {
+	if (!s.supported || s.buckets.length === 0) { return ''; }
+	const index = selectedBucketIndex(s);
+	const picker = `<div class="bucket-controls">${bucketPickerHtml(s.buckets, index >= 0 ? s.buckets[index].key : '')}</div>`;
+	const base = index >= 0 ? buildBucketDetail(s.points, index, payloadNow(d)) : null;
+	if (!base) { return picker + renderBucketDetailPlaceholder(); }
+	const canDrill = canDrillInto(s.resolution);
+	if (tab === 'skills') {
+		const skill = buildSkillBucketDetail(s.skills.weeks, index);
+		return picker + (skill ? renderSkillBucketDetail(skill, base, canDrill) : renderBucketDetailPlaceholder());
+	}
+	if (tab === 'models') {
+		const spec = MODEL_TREND_METRICS.find(m => m.id === modelState.trendMetric) ?? MODEL_TREND_METRICS[0];
+		const scale = spec.unit === 'percent' ? 100 : 1;
+		const days = scopedModelDaily(d);
+		const entries = trendModels().map(model => {
+			const series = buildModelBucketSeries(days, model, s.buckets);
+			const detail = buildModelBucketDetail(series, index, m => { const v = spec.pick(m); return v === null ? null : v * scale; }, spec.goodDirection);
+			return { name: getModelDisplayName(model), detail };
+		});
+		return picker + renderModelBucketDetail(base, entries, spec.label, spec.unit, MIN_SESSION_SHARE_FOR_COMPARE, canDrill);
+	}
+	return picker + renderBucketDetail(base, canDrill);
 }
 
 // ── Formatting ─────────────────────────────────────────────────────────
@@ -465,21 +573,6 @@ function trendBadge(values: (number | null)[], goodDirection: 'up' | 'down'): st
 	const arrow = change > 0 ? '↑' : '↓';
 	const good = (change < 0) === (goodDirection === 'down');
 	return `<span class="trend-badge ${good ? 'good' : 'bad'}">${arrow} ${Math.abs(change).toFixed(0)}%</span>`;
-}
-
-// ── Verdict ────────────────────────────────────────────────────────────
-
-function computeVerdict(d: EfficiencyViewData): { cls: string; icon: string; text: string } {
-	const scored = d.deltas.filter(x => x.improved !== null);
-	if (scored.length === 0) {
-		return { cls: 'unknown', icon: '🔍', text: 'Not enough data yet to judge an efficiency trend — keep using AI-assisted sessions and check back after a few weeks.' };
-	}
-	const improved = scored.filter(x => x.improved).length;
-	const share = improved / scored.length;
-	const detail = `${improved} of ${scored.length} efficiency metrics improved vs. ${escapeHtml(d.deltaWindows.prev)}`;
-	if (share >= 0.6) { return { cls: 'improving', icon: '🚀', text: `You are trending more efficient: ${detail}.` }; }
-	if (share >= 0.4) { return { cls: 'mixed', icon: '⚖️', text: `Mixed picture: ${detail}. Check the tabs below to see which levers moved.` }; }
-	return { cls: 'declining', icon: '🧭', text: `Efficiency dipped: only ${detail}. The Cost Attribution tab shows where the change came from.` };
 }
 
 // ── Section renderers ──────────────────────────────────────────────────
@@ -549,7 +642,7 @@ function renderTrendsTab(d: EfficiencyViewData, s: ScopedData): string {
 			? `<div class="chart-wrap"><canvas id="trend-${spec.id}"></canvas></div>`
 			: `<div class="trend-empty">${escapeHtml(spec.unavailableHint)}</div>`;
 		return `
-			<div class="trend-card">
+			<div class="trend-card" id="trend-card-${spec.id}" tabindex="-1">
 				<h3><span>${spec.title}</span>${spec.available ? trendBadge(spec.values, spec.goodDirection) : ''}</h3>
 				<p class="trend-desc">${escapeHtml(spec.desc)}</p>
 				${body}
@@ -558,6 +651,7 @@ function renderTrendsTab(d: EfficiencyViewData, s: ScopedData): string {
 	return `
 		${renderScopeToolbar(d, s)}
 		<p class="eff-section-note">${escapeHtml(trendsIntro(s))}</p>
+		${renderBucketSection(d, s, 'trends')}
 		<div class="trend-grid">${cards}</div>`;
 }
 
@@ -601,6 +695,7 @@ function renderDeltasTab(d: EfficiencyViewData): string {
 				</div>
 				<div class="delta-prev">was ${fmtValue(delta.prev, delta.unit)} in ${escapeHtml(d.deltaWindows.prev)}</div>
 				<p class="delta-desc">${escapeHtml(delta.description)}</p>
+				${deltaContextButtonHtml(delta.id, delta.label, d.modelDaily.length > 0)}
 			</div>`;
 	}).join('');
 	return `
@@ -656,7 +751,8 @@ function skillImpactCard(impact: SkillImpact): string {
 }
 
 function renderSkillsTab(d: EfficiencyViewData, s: ScopedData): string {
-	const toolbar = renderScopeToolbar(d, s);
+	// With no skills there is no chart and no Selected period control to point at.
+	const toolbar = renderScopeToolbar(d, s, s.hasSkills);
 	if (!s.hasSkills) {
 		return `
 			${toolbar}
@@ -670,7 +766,10 @@ function renderSkillsTab(d: EfficiencyViewData, s: ScopedData): string {
 	return `
 		${toolbar}
 		<p class="eff-section-note">${s.skills.totalCalls} skill invocations across ${s.skills.topSkills.length} skill${s.skills.topSkills.length === 1 ? '' : 's'} over ${escapeHtml(s.range.label.toLowerCase())}. Bars stack invocations per skill; the line is the share of sessions that used any skill.</p>
+		${renderBucketSection(d, s, 'skills')}
 		<div class="combined-wrap"><canvas id="skills-chart"></canvas></div>
+		<h3 class="skill-section-heading">${escapeHtml(localize('efficiency.skills.table.heading'))}</h3>
+		${renderSkillUsageTable(buildSkillUsageRows(s.skills, d.skillDescriptions))}
 		${impactSection}`;
 }
 
@@ -793,6 +892,7 @@ function renderCombinedTab(d: EfficiencyViewData, s: ScopedData): string {
 	return `
 		${renderScopeToolbar(d, s)}
 		<p class="eff-section-note">Everything on one chart. Ratio lines are <b>indexed to 100</b> at their first measured bucket so different units share one axis — a line falling below 100 means that ratio improved (except apply rate, where up is good). Bars show raw lines-of-code output per bucket: efficiency gains only count if the bars hold up.</p>
+		${renderBucketSection(d, s, 'combined')}
 		<div class="combined-wrap"><canvas id="combined-chart"></canvas></div>`;
 }
 
@@ -807,6 +907,8 @@ const MODEL_TREND_METRICS: { id: ModelComparisonMetricId; label: string; unit: E
 	{ id: 'retry-rate', label: 'Edit retry rate', unit: 'ratio', goodDirection: 'down', pick: m => m.retryRate },
 	{ id: 'tokens-per-edit-turn', label: 'Tokens per edit turn', unit: 'tokens', goodDirection: 'down', pick: m => m.tokensPerEditTurn },
 	{ id: 'active-minutes-per-session', label: 'Active minutes per session', unit: 'minutes', goodDirection: 'down', pick: m => m.activeMinutesPerSession },
+	{ id: 'median-turn-seconds', label: 'Median turn time', unit: 'seconds', goodDirection: 'down', pick: m => m.medianTurnSeconds },
+	{ id: 'output-tokens-per-second', label: 'Output tokens per second', unit: 'tokensPerSecond', goodDirection: 'up', pick: m => m.outputTokensPerSecond },
 ];
 
 /** Metrics shown on the normalized radar — one axis per dimension of "efficient". */
@@ -827,10 +929,14 @@ type CompareMode = ModelCompareSelection['mode'];
 const modelState: ModelCompareSelection & {
 	trendMetric: ModelComparisonMetricId;
 	initialized: boolean;
+	sessionFilter: ModelSessionFilter;
+	costBasis: ModelCostBasis;
 } = {
-	mode: 'models', modelA: '', modelB: '',
+	mode: 'models', modelA: '', modelB: '', editorA: '', editorB: '',
 	window: 'last30', windowA: 'lastMonth', windowB: 'thisMonth',
 	trendMetric: 'cost-per-edit-turn', initialized: false,
+	sessionFilter: { ...DEFAULT_MODEL_SESSION_FILTER },
+	costBasis: 'provider',
 };
 
 /** Which window ids currently have per-model data, in `WINDOW_OPTIONS` order. */
@@ -898,23 +1004,34 @@ function reconcileModelState(d: EfficiencyViewData): void {
 	const next = reconcileModelSelection(scopedModelDaily(d), modelState, payloadNow(d), scope.vendor || undefined);
 	modelState.modelA = next.modelA;
 	modelState.modelB = next.modelB;
+	modelState.editorA = next.editorA ?? '';
+	modelState.editorB = next.editorB ?? '';
 }
 
 /** Resolves the current selection into a comparison, or null when a side has no data. */
 function buildModelComparison(d: EfficiencyViewData): ModelComparison | null {
 	const now = payloadNow(d);
 	const scopedDays = scopedModelDaily(d);
+	const filter = modelState.sessionFilter;
+	if (modelState.mode === 'harnesses') {
+		return compareModelAcrossHarnesses(scopedDays, modelState.modelA, modelState.editorA ?? '', modelState.editorB ?? '', resolveModelCompareWindow(modelState.window, now), filter, modelState.costBasis);
+	}
 	if (modelState.mode === 'periods') {
 		const wA = resolveModelCompareWindow(modelState.windowA, now);
 		const wB = resolveModelCompareWindow(modelState.windowB, now);
-		const a = computeModelPeriodMetrics(selectDaysInWindow(scopedDays, wA), modelState.modelA, wA.label);
-		const b = computeModelPeriodMetrics(selectDaysInWindow(scopedDays, wB), modelState.modelA, wB.label);
+		const daysA = selectDaysInWindow(scopedDays, wA);
+		const daysB = selectDaysInWindow(scopedDays, wB);
+		// One cutoff for both sides, so neither is trimmed by a different yardstick.
+		const cutoff = computeOutlierCutoffTokens([{ days: daysA, model: modelState.modelA }, { days: daysB, model: modelState.modelA }], filter);
+		const a = computeModelPeriodMetrics(daysA, modelState.modelA, wA.label, filter, cutoff, modelState.costBasis);
+		const b = computeModelPeriodMetrics(daysB, modelState.modelA, wB.label, filter, cutoff, modelState.costBasis);
 		return a && b ? compareModels(a, b) : null;
 	}
 	const w = resolveModelCompareWindow(modelState.window, now);
 	const days = selectDaysInWindow(scopedDays, w);
-	const a = computeModelPeriodMetrics(days, modelState.modelA, w.label);
-	const b = computeModelPeriodMetrics(days, modelState.modelB, w.label);
+	const cutoff = computeOutlierCutoffTokens([{ days, model: modelState.modelA }, { days, model: modelState.modelB }], filter);
+	const a = computeModelPeriodMetrics(days, modelState.modelA, w.label, filter, cutoff, modelState.costBasis);
+	const b = computeModelPeriodMetrics(days, modelState.modelB, w.label, filter, cutoff, modelState.costBasis);
 	return a && b ? compareModels(a, b) : null;
 }
 
@@ -1045,10 +1162,19 @@ function renderModelControls(d: EfficiencyViewData, eligible: ComparableModel[])
 	const modeSelect = selectHtml('model-mode', [
 		{ value: 'models', label: localize('efficiency.models.mode.models') },
 		{ value: 'periods', label: localize('efficiency.models.mode.periods') },
+		{ value: 'harnesses', label: localize('efficiency.models.mode.harnesses') },
 	], modelState.mode);
 	const caption = (key: string): string => escapeHtml(localize(`efficiency.models.controls.${key}`));
 	// Mode and window(s) share the first row; the model pickers get their own row below.
-	const body = modelState.mode === 'periods'
+	const harnesses = listModelHarnesses(selectDaysInWindow(scopedModelDaily(d), resolveModelCompareWindow(modelState.window, payloadNow(d)))).map(h => ({ value: h, label: h }));
+	const body = modelState.mode === 'harnesses'
+		? `
+			<label>${caption('window')} ${selectHtml('window', windows, modelState.window)}</label>
+			<div class="model-controls-break"></div>
+			<label>${caption('model')} ${searchableSelectHtml('model-a', models, modelState.modelA)}</label>
+			<label>${caption('harnessA')} ${selectHtml('editor-a', harnesses, modelState.editorA ?? '')}</label>
+			<label>${caption('harnessB')} ${selectHtml('editor-b', harnesses, modelState.editorB ?? '')}</label>`
+		: modelState.mode === 'periods'
 		? `
 			<label>${caption('baseline')} ${selectHtml('window-a', windows, modelState.windowA)}</label>
 			<label>${caption('comparedWith')} ${selectHtml('window-b', windows, modelState.windowB)}</label>
@@ -1059,7 +1185,25 @@ function renderModelControls(d: EfficiencyViewData, eligible: ComparableModel[])
 			<div class="model-controls-break"></div>
 			<label>${caption('modelA')} ${searchableSelectHtml('model-a', models, modelState.modelA)}</label>
 			<label>${caption('modelB')} ${searchableSelectHtml('model-b', modelBOptions(models), modelState.modelB)}</label>`;
-	return `<div class="model-controls"><label>${caption('mode')} ${modeSelect}</label>${body}</div>`;
+	const trimSelect = selectHtml('model-outlier-trim', [
+		{ value: 'p95', label: localize('efficiency.models.outliers.p95') },
+		{ value: 'p90', label: localize('efficiency.models.outliers.p90') },
+		{ value: 'none', label: localize('efficiency.models.outliers.none') },
+	], modelState.sessionFilter.outlierTrim);
+	const mixedToggle = `<label class="model-toggle"><input type="checkbox" id="model-include-mixed"${modelState.sessionFilter.includeMixedSessions ? ' checked' : ''}> ${caption('includeMixed')}</label>`;
+	const basisSelect = hasExactCostData(d)
+		? `<label>${caption('costBasis')} ${selectHtml('model-cost-basis', [
+			{ value: 'provider', label: localize('efficiency.models.costBasis.provider') },
+			{ value: 'exact', label: localize('efficiency.models.costBasis.exact') },
+		], modelState.costBasis)}</label>`
+		: '';
+	const filterRow = `<div class="model-controls-break"></div><label>${caption('outliers')} ${trimSelect}</label>${mixedToggle}${basisSelect}`;
+	return `<div class="model-controls"><label>${caption('mode')} ${modeSelect}</label>${body}${filterRow}</div>`;
+}
+
+/** True when any session in the payload carries exact Copilot billing, i.e. the cost-basis switch can show something. */
+function hasExactCostData(d: EfficiencyViewData): boolean {
+	return d.modelDaily.some(day => Object.values(day.modelEfficiency ?? {}).some(e => (e.exactCostSessions ?? 0) > 0));
 }
 
 /** Renders a side's headline volume so the reader can judge the sample for themselves. */
@@ -1069,12 +1213,23 @@ function sideSummary(m: ModelPeriodMetrics, side: 'A' | 'B'): string {
 			<div class="model-side-tag">${side}</div>
 			<div class="model-side-name">${escapeHtml(m.displayName)}</div>
 			<div class="model-side-period">${escapeHtml(m.periodLabel)}</div>
-			<div class="model-side-stats">${m.sessions} sessions · ${m.editTurns} edit turns · ${formatCompact(m.tokens)} tokens · $${m.cost.toFixed(2)}</div>
+			<div class="model-side-stats">${escapeHtml(localizeFormat('efficiency.models.sideStats', String(m.sessions), String(m.editTurns), formatCompact(m.tokens), m.costBasis === 'exact' && !m.exactCostAvailable ? '—' : `$${m.cost.toFixed(2)}`))}</div>
 		</div>`;
 }
 
+/** One line saying which sessions the table is built from, so a trimmed comparison never passes as the whole dataset. */
+function filterSummaryHtml(cmp: ModelComparison): string {
+	const f = modelState.sessionFilter;
+	const parts = [localize(f.includeMixedSessions ? 'efficiency.models.filterSummary.mixed' : 'efficiency.models.filterSummary.single')];
+	if (f.outlierTrim !== 'none') { parts.push(localize(`efficiency.models.outliers.${f.outlierTrim}`)); }
+	const mixed = cmp.a.filtering.excludedMixed + cmp.b.filtering.excludedMixed;
+	const outliers = cmp.a.filtering.excludedOutliers + cmp.b.filtering.excludedOutliers;
+	if (mixed + outliers > 0) { parts.push(localizeFormat('efficiency.models.filterSummary.excluded', String(mixed), String(outliers))); }
+	return `<p class="model-filter-summary">${escapeHtml(parts.join(' · '))}</p>`;
+}
+
 function comparisonTableHtml(cmp: ModelComparison): string {
-	const modeKey = modelState.mode === 'periods' ? 'efficiency.models.mode.periods' : 'efficiency.models.mode.models';
+	const modeKey = `efficiency.models.mode.${modelState.mode}`;
 	return renderModelComparisonTable(cmp, localize(modeKey));
 }
 
@@ -1089,7 +1244,8 @@ function verdictHtml(cmp: ModelComparison): string {
 	const side = winner === 'a' ? cmp.a : cmp.b;
 	const count = winner === 'a' ? wins.a : wins.b;
 	const other = winner === 'a' ? wins.b : wins.a;
-	return `<div class="model-verdict ${winner === 'b' ? 'improving' : 'declining'}">🏆 ${escapeHtml(side.displayName)} (${escapeHtml(side.periodLabel)}) wins ${count} of ${count + other} decisive metrics.</div>`;
+	const text = localizeFormat('efficiency.models.verdict.wins', side.displayName, side.periodLabel, String(count), String(count + other));
+	return `<div class="model-verdict win-${winner}">${escapeHtml(text)}</div>`;
 }
 
 function caveatsHtml(cmp: ModelComparison): string {
@@ -1220,6 +1376,10 @@ function renderCacheTab(d: EfficiencyViewData): string {
  */
 function noEligibleModelsNote(d: EfficiencyViewData, eligible: ComparableModel[]): string {
 	const now = payloadNow(d);
+	if (modelState.mode === 'harnesses') {
+		const w = resolveModelCompareWindow(modelState.window, now);
+		return localizeFormat('efficiency.models.noSharedHarnessModel', w.label, w.rangeLabel);
+	}
 	if (modelState.mode === 'periods') {
 		const a = resolveModelCompareWindow(modelState.windowA, now);
 		const b = resolveModelCompareWindow(modelState.windowB, now);
@@ -1233,13 +1393,13 @@ function noEligibleModelsNote(d: EfficiencyViewData, eligible: ComparableModel[]
 
 function renderModelsTab(d: EfficiencyViewData, s: ScopedData): string {
 	initModelState(d);
-	const toolbar = renderScopeToolbar(d, s);
+	const filters = renderModelsFilterBar(d, s);
 	if (d.modelDaily.length === 0) {
 		return `<p class="eff-section-note">No per-model efficiency data yet. This tab needs sessions whose logs carry per-turn tool-call detail (Copilot CLI, Claude Code, Copilot Chat and similar). Keep working and check back in a few days.</p>`;
 	}
 	if (scopedModelDaily(d).length === 0) {
 		return `
-			${toolbar}
+			${filters}
 			<p class="eff-section-note">No per-model data for the selected editor. Pick another editor, or “All editors”.</p>`;
 	}
 	reconcileModelState(d);
@@ -1249,14 +1409,16 @@ function renderModelsTab(d: EfficiencyViewData, s: ScopedData): string {
 	const controls = renderModelControls(d, eligible);
 	const cmp = buildModelComparison(d);
 	const metricOptions = MODEL_TREND_METRICS.map(m => ({ value: m.id, label: m.label }));
-	// The drift chart is driven by the scope toolbar's range, not by the
-	// comparison's own window pickers, so it stays useful even when the
-	// head-to-head has no data — hiding it would throw away a valid chart
-	// because an unrelated selection came up empty.
+	// Three independent period controls, each kept beside what it drives: the
+	// comparison's window pickers, the drift chart's range, and the selected
+	// period within that range. The drift chart ignores the comparison's windows,
+	// so it stays useful even when the head-to-head has no data — hiding it would
+	// throw away a valid chart because an unrelated selection came up empty.
 	const comparison = cmp
 		? `
-		<p class="eff-section-note">Head-to-head efficiency. Costs use <b>provider/API rates</b>, so this measures the models themselves rather than a billing plan — “model vendor” above is the model's own provider, not who bills for the call. Metrics whose sample was too small show as “—”. Session-level signals (duration, lines changed) are split across a session's models by token share.</p>
+		<p class="eff-section-note">${modelState.costBasis === 'exact' ? localize('efficiency.models.costBasis.exactNote') : localize('efficiency.models.costBasis.providerNote')}</p>
 		<div class="model-sides">${sideSummary(cmp.a, 'A')}${sideSummary(cmp.b, 'B')}</div>
+		${filterSummaryHtml(cmp)}
 		${verdictHtml(cmp)}
 		${comparisonTableHtml(cmp)}
 		${caveatsHtml(cmp)}
@@ -1266,12 +1428,17 @@ function renderModelsTab(d: EfficiencyViewData, s: ScopedData): string {
 		<div class="model-radar-wrap"><canvas id="model-radar"></canvas></div>`
 		: `<p class="eff-section-note">${escapeHtml(scope.editor || scope.vendor ? noComparisonReason() : noEligibleModelsNote(d, eligible))}</p>`;
 	return `
-		${toolbar}
+		${filters}
+		${filters ? `<p class="eff-section-note">${escapeHtml(localize('efficiency.models.filtersNote'))}</p>` : ''}
+		<h3>${escapeHtml(localize('efficiency.models.headToHead.title'))}</h3>
+		<p class="eff-section-note">${escapeHtml(localize('efficiency.models.headToHead.note'))}</p>
 		${controls}
 		${comparison}
-		<h3>Drift over time</h3>
-		<p class="eff-section-note">${escapeHtml(resolutionLabel(s.resolution))} values for each side's model over ${escapeHtml(s.range.label.toLowerCase())}, so a model getting better — or quietly getting worse — is visible. Gaps are buckets where the model was not used. The head-to-head comparison above keeps its own window pickers.</p>
+		<h3>${escapeHtml(localize('efficiency.models.drift.title'))}</h3>
+		${renderDriftScopeBar(d, s)}
+		<p class="eff-section-note">${escapeHtml(localizeFormat('efficiency.models.drift.note', resolutionLabel(s.resolution), s.range.label.toLowerCase()))}</p>
 		<div class="model-trend-controls"><label>Metric ${selectHtml('model-trend-metric', metricOptions, modelState.trendMetric)}</label></div>
+		${renderBucketSection(d, s, 'models')}
 		<div class="model-trend-wrap"><canvas id="model-trend"></canvas></div>`;
 }
 
@@ -1371,7 +1538,7 @@ async function drawModelRadar(cmp: ModelComparison, generation: number): Promise
 
 /** The models whose weekly series belong on the trend chart for the current mode. */
 function trendModels(): string[] {
-	const wanted = modelState.mode === 'periods'
+	const wanted = modelState.mode !== 'models'
 		? [modelState.modelA]
 		: [modelState.modelA, modelState.modelB];
 	return wanted.filter((m, i, arr) => m !== '' && arr.indexOf(m) === i);
@@ -1572,6 +1739,7 @@ function renderActiveTab(d: EfficiencyViewData, s: ScopedData): string {
 	switch (activeTab) {
 		case 'trends': return renderTrendsTab(d, s);
 		case 'skills': return renderSkillsTab(d, s);
+		case 'ttft': return renderTtftTab();
 		case 'deltas': return renderDeltasTab(d);
 		case 'attribution': return renderAttributionTab(d);
 		case 'cache': return renderCacheTab(d);
@@ -1593,17 +1761,22 @@ function render(): void {
 	// highlighted tab button never disagree.
 	if (!visibleTabs(data).some(t => t.id === activeTab)) { activeTab = 'trends'; }
 	const scoped = computeScopedData(data);
-	const verdict = computeVerdict(data);
+	const verdict = computeVerdict(data.deltas, data.deltaWindows.prev);
 	setHtml(root, `
 		<style>${themeStyles}</style><style>${dataTableStyles}</style>
 		<style>${styles}</style>
 		<div class="efficiency-root">
-			<div class="button-row">${navButtonsHtml('btn-efficiency', !!data.backendConfigured)}</div>
-			<div class="eff-header"><h1>⚡ Efficiency</h1></div>
+			<div class="header">
+				<div class="header-left">
+					<span class="header-icon">⚡</span>
+					<span class="header-title">${escapeHtml(localize('nav.btnEfficiency'))}</span>
+				</div>
+				<div class="button-row">${navButtonsHtml('btn-efficiency', !!data.backendConfigured)}</div>
+			</div>
 			<p class="eff-subtitle">Are you working more efficiently with AI over time — and is it coming from using AI differently, cheaper models, or leaner sessions? Last updated ${escapeHtml(new Date(data.lastUpdated).toLocaleString())}.</p>
 			<div class="eff-verdict ${verdict.cls}"><span class="verdict-icon">${verdict.icon}</span><span class="verdict-text">${verdict.text}</span></div>
 			<div class="eff-tabs">
-				${visibleTabs(data).map(t => `<button class="eff-tab ${t.id === activeTab ? 'active' : ''}" data-tab="${t.id}">${t.label}</button>`).join('')}
+				${visibleTabs(data).map(t => `<button class="eff-tab ${t.id === activeTab ? 'active' : ''}" data-tab="${t.id}">${t.labelKey ? escapeHtml(localize(t.labelKey)) : t.label}</button>`).join('')}
 			</div>
 			<div id="eff-tab-content">${renderActiveTab(data, scoped)}</div>
 			<p class="caveat">⚠️ Honest caveats: costs are estimates from token counts and public rates; lines of code is a weak value proxy (refactors and generated boilerplate distort it); shorter sessions only count as efficiency when output (lines, applied blocks, PRs) holds or rises. Every trend here should be read alongside its value counterpart.</p>
@@ -1614,6 +1787,7 @@ function render(): void {
 	if (activeTab === 'skills' && scoped.hasSkills) { void drawSkillsChart(scoped, generation); }
 	if (activeTab === 'combined') { void drawCombinedChart(scoped, generation); }
 	if (activeTab === 'models') { void drawModelCharts(data, scoped, generation); }
+	if (activeTab === 'ttft') { wireTtftTab(({ granularity, scanRange }) => { vscode.postMessage({ command: 'analyzeTtft', granularity, scanRange }); }, persistState); }
 }
 
 /** Applies a scope transition: persist it and redraw, skipping a no-op change. */
@@ -1645,13 +1819,61 @@ function wireScopeToolbar(): void {
 		applyScope({ ...scope, vendor: (ev.target as HTMLSelectElement).value });
 	});
 	document.getElementById('eff-drill-back')?.addEventListener('click', () => { applyScope(drillBack(scope)); });
-	document.getElementById('eff-drill-pick')?.addEventListener('change', ev => {
-		const key = (ev.target as HTMLSelectElement).value;
-		if (!key || !data) { return; }
-		const bucket = computeScopedData(data).buckets.find(b => b.key === key);
-		if (bucket) { applyScope(drillInto(scope, bucket)); }
+}
+
+/** Wires the selected-period picker and its "show the days" button. */
+function wireBucketControls(): void {
+	document.getElementById(BUCKET_PICK_ID)?.addEventListener('change', ev => {
+		if (!data) { return; }
+		selectBucket(computeScopedData(data), (ev.target as HTMLSelectElement).value, true);
+	});
+	document.getElementById(BUCKET_DRILL_BUTTON_ID)?.addEventListener('click', () => {
+		if (!data) { return; }
+		const s = computeScopedData(data);
+		const bucket = s.buckets[selectedBucketIndex(s)];
+		if (!bucket) { return; }
+		selectedBucket = null;
+		applyScope(drillInto(scope, bucket));
 	});
 }
+
+/**
+ * Month vs Month cards focus their weekly trend, or the per-model metric where
+ * only that exists; Cost Attribution rows open the concrete model in Models.
+ * None of them narrows the card's own population.
+ */
+function handleContextClick(btn: HTMLButtonElement): void {
+	const target = btn.dataset.target ?? '';
+	if (!data || !target) { return; }
+	if (btn.dataset.ctx === 'trend') {
+		activeTab = 'trends';
+		persistState();
+		render();
+		const card = document.getElementById(`trend-card-${target}`);
+		card?.scrollIntoView?.({ block: 'center' });
+		card?.focus();
+	} else if (btn.dataset.ctx === 'model-metric') {
+		activeTab = 'models';
+		modelState.trendMetric = target as ModelComparisonMetricId;
+		persistState();
+		render();
+		document.getElementById('model-trend-metric')?.focus();
+	} else if (btn.dataset.ctx === 'model') {
+		activeTab = 'models';
+		initModelState(data);
+		modelState.modelA = target;
+		persistState();
+		render();
+		document.getElementById('model-trend-metric')?.focus();
+	}
+}
+
+// Delegated, and registered once: the sortable model-mix table re-renders its own rows, which
+// would drop per-button listeners, and render() runs far more often than this needs wiring.
+document.addEventListener('click', ev => {
+	const btn = (ev.target as Element | null)?.closest?.('.eff-context-btn');
+	if (btn) { handleContextClick(btn as HTMLButtonElement); }
+});
 
 /** Wires the Models tab selects; each change updates state and re-renders. */
 function wireModelControls(): void {
@@ -1666,9 +1888,16 @@ function wireModelControls(): void {
 	bind('model-mode', v => { modelState.mode = v as CompareMode; });
 	bind('model-a', v => { modelState.modelA = v; });
 	bind('model-b', v => { modelState.modelB = v; });
+	bind('editor-a', v => { modelState.editorA = v; });
+	bind('editor-b', v => { modelState.editorB = v; });
 	bind('window', v => { modelState.window = v as ModelCompareWindowId; });
 	bind('window-a', v => { modelState.windowA = v as ModelCompareWindowId; });
 	bind('window-b', v => { modelState.windowB = v as ModelCompareWindowId; });
+	bind('model-outlier-trim', v => { modelState.sessionFilter.outlierTrim = v as ModelSessionFilter['outlierTrim']; });
+	bind('model-cost-basis', v => { modelState.costBasis = v === 'exact' ? 'exact' : 'provider'; });
+	bind('model-include-mixed', () => {
+		modelState.sessionFilter.includeMixedSessions = (document.getElementById('model-include-mixed') as HTMLInputElement).checked;
+	});
 	bind('model-trend-metric', v => { modelState.trendMetric = v as ModelComparisonMetricId; });
 }
 
@@ -1684,6 +1913,7 @@ function wireEvents(): void {
 		});
 	});
 	wireScopeToolbar();
+	wireBucketControls();
 	wireModelControls();
 	document.getElementById('btn-refresh')?.addEventListener('click', () => { vscode.postMessage({ command: 'refresh' }); });
 	document.getElementById('btn-details')?.addEventListener('click', () => { vscode.postMessage({ command: 'showDetails' }); });
@@ -1716,6 +1946,10 @@ function applyValueSignals(next: EfficiencyViewData['value']): void {
 	// element, and the state assigned above is what that render then picks up.
 	setHtml(document.getElementById('eff-tab-content'), renderValueTab(data));
 }
+
+registerMessageHandler<{ command?: string } & TtftResultMessage>((message) => {
+	if (message?.command === 'ttftResult') { handleTtftResult(message); }
+});
 
 registerMessageHandler<{ command?: string; value?: unknown }>((message) => {
 	// Repository PR results are the only host push this view consumes. Cloud-agent task loads

@@ -4,32 +4,27 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import { makeWorkspaceFixtureDir } from './tmpFixtureDirs';
+import { emptyRefs, emptyAnalysis } from './usageAnalysisFixtures';
 import {
     mergeUsageAnalysis,
-    analyzeContextReferences,
     analyzeContentReferences,
     analyzeVariableData,
     analyzeRequestContext,
-    analyzeCliAttachments,
     calculateModelSwitching,
     trackEnhancedMetrics,
     analyzeSessionUsage,
     getModelUsageFromSession,
     mergeModelEfficiencyTokens,
-    deriveConversationPatterns,
     isParsedSessionJson,
     createEmptySessionUsageAnalysis,
     applyModelTierClassification,
     extractInvokedSkillNameFromPlainText,
     type UsageAnalysisDeps,
 } from '../../../src/usageAnalysis';
-import { createEmptyTaskClassificationResult } from '../../../src/taskClassification';
 import { calculateEstimatedCost } from '../../../src/tokenEstimation';
 import { normalizeMcpToolName } from '../../../src/workspaceHelpers';
 import type {
     UsageAnalysisPeriod,
-    SessionUsageAnalysis,
-    ContextReferenceUsage,
 } from '../../../src/types';
 
 // ---------------------------------------------------------------------------
@@ -82,35 +77,6 @@ test('Auto usage: marker-only estimates work but session picker and CLI model ch
 	assert.equal(cli['gpt-4o'].autoRouting, undefined);
 });
 
-function emptyRefs(): ContextReferenceUsage {
-    return {
-        file: 0, selection: 0, implicitSelection: 0, symbol: 0, codebase: 0,
-        workspace: 0, terminal: 0, vscode: 0, terminalLastCommand: 0,
-        terminalSelection: 0, clipboard: 0, changes: 0, outputPanel: 0,
-        problemsPanel: 0, pullRequest: 0, codeContextLines: 0, byKind: {}, byPath: {}, copilotInstructions: 0, agentsMd: 0,
-    };
-}
-
-function emptyAnalysis(): SessionUsageAnalysis {
-    return {
-        toolCalls: { total: 0, byTool: {} },
-        modeUsage: { ask: 0, edit: 0, agent: 0, plan: 0, customAgent: 0, cli: 0 },
-        contextReferences: emptyRefs(),
-        mcpTools: { total: 0, byServer: {}, byTool: {} },
-        taskClassification: createEmptyTaskClassificationResult(),
-        modelSwitching: {
-            uniqueModels: [], modelCount: 0, switchCount: 0,
-            tiers: { standard: [], premium: [], unknown: [] },
-            hasMixedTiers: false,
-            standardRequests: 0, premiumRequests: 0, unknownRequests: 0, totalRequests: 0,
-            costBuckets: { low: [], medium: [], high: [], unknown: [] },
-            hasMixedCosts: false,
-            lowCostRequests: 0, mediumCostRequests: 0, highCostRequests: 0,
-            autoSessions: 0, foundryWindowsSessions: 0, unknownProviderSessions: 0,
-            selectedModelExtensions: [], unknownProviderModels: [],
-        },
-    };
-}
 
 function emptyPeriod(): UsageAnalysisPeriod {
     return {
@@ -208,6 +174,36 @@ test('mergeUsageAnalysis: accumulates tool call counts across sessions', () => {
     assert.equal(period.toolCalls.byTool['listFiles'], 1);
 });
 
+test('mergeUsageAnalysis: sums Copilot Fusion rollups across sessions and merges the pattern mix', () => {
+    const period = emptyPeriod();
+    const rollup = (turns: number, aiu: number, pattern: string) => ({
+        sessions: 1, totalTurns: turns, compoundTurns: 1, judgeAccepts: 0, judgeRejects: 1, escalatedTurns: 1,
+        totalAiu: aiu, reviewAiu: aiu / 2, degradedTurns: 0, patternCounts: [{ pattern, turns, aiu }],
+    });
+    const a1 = emptyAnalysis();
+    a1.hydraFusion = rollup(2, 10, 'cascade');
+    const a2 = emptyAnalysis();
+    a2.hydraFusion = rollup(1, 4, 'cascade');
+    const a3 = emptyAnalysis();
+    a3.hydraFusion = rollup(1, 1, 'single');
+    mergeUsageAnalysis(period, a1);
+    mergeUsageAnalysis(period, a2);
+    mergeUsageAnalysis(period, a3);
+    mergeUsageAnalysis(period, emptyAnalysis());
+    assert.equal(period.hydraFusion!.sessions, 3);
+    assert.equal(period.hydraFusion!.totalTurns, 4);
+    assert.equal(period.hydraFusion!.totalAiu, 15);
+    assert.deepEqual(period.hydraFusion!.patternCounts, [{ pattern: 'cascade', turns: 3, aiu: 14 }, { pattern: 'single', turns: 1, aiu: 1 }]);
+    // The session's own rollup is not mutated by being merged.
+    assert.equal(a1.hydraFusion.totalTurns, 2);
+});
+
+test('mergeUsageAnalysis: a period with no routed sessions has no hydraFusion rollup', () => {
+    const period = emptyPeriod();
+    mergeUsageAnalysis(period, emptyAnalysis());
+    assert.equal(period.hydraFusion, undefined);
+});
+
 test('mergeUsageAnalysis: accumulates model efficiency counters per model', () => {
     const period = emptyPeriod();
     const a = emptyAnalysis();
@@ -224,6 +220,37 @@ test('mergeUsageAnalysis: accumulates model efficiency counters per model', () =
     assert.equal(period.modelEfficiency?.['gpt-4o'].editTurns, 4);
     assert.equal(period.modelEfficiency?.['gpt-4o'].oneShotEditTurns, 2);
     assert.equal(period.modelEfficiency?.['gpt-4o'].retries, 2);
+});
+
+test('mergeUsageAnalysis: sums vendorStats across sessions and keeps absent stats absent', () => {
+    const period = emptyPeriod();
+    const a = emptyAnalysis();
+    a.vendorStats = {
+        tokensPerSecond: { samples: 1, sum: 100 }, reportedCostDollars: 0.5, steps: 10,
+        toolOutcomes: { succeeded: 8, failed: 1 },
+    };
+    const b = emptyAnalysis();
+    b.vendorStats = {
+        tokensPerSecond: { samples: 1, sum: 50 }, lastTurnDurationMs: { samples: 1, sum: 2000 },
+        toolOutcomes: { succeeded: 2, rejected: 3, hookDenied: 1 },
+    };
+    mergeUsageAnalysis(period, a);
+    mergeUsageAnalysis(period, b);
+    mergeUsageAnalysis(period, emptyAnalysis());
+
+    const v = period.vendorStats!;
+    assert.deepEqual(v.tokensPerSecond, { samples: 2, sum: 150 });
+    assert.deepEqual(v.lastTurnDurationMs, { samples: 1, sum: 2000 });
+    assert.equal(v.reportedCostDollars, 0.5);
+    assert.equal(v.steps, 10);
+    assert.deepEqual(v.toolOutcomes, { succeeded: 10, failed: 1, rejected: 3, hookDenied: 1 });
+    assert.equal('agreed' in v.toolOutcomes!, false, 'a counter no session reported stays absent');
+});
+
+test('mergeUsageAnalysis: leaves period.vendorStats absent when no analysis has it', () => {
+    const period = emptyPeriod();
+    mergeUsageAnalysis(period, emptyAnalysis());
+    assert.equal(period.vendorStats, undefined);
 });
 
 test('mergeUsageAnalysis: leaves period.modelEfficiency absent when analysis has none', () => {
@@ -415,443 +442,6 @@ test('mergeUsageAnalysis: accumulates byKind context counts', () => {
 
     assert.equal(period.contextReferences.byKind['copilot.image'], 4);
     assert.equal(period.contextReferences.byKind['file'], 10);
-});
-
-// ---------------------------------------------------------------------------
-// analyzeContextReferences
-// ---------------------------------------------------------------------------
-
-test('analyzeContextReferences: counts #file references in text', () => {
-    const refs = emptyRefs();
-    analyzeContextReferences('please look at #file and #file too', refs);
-    assert.equal(refs.file, 2);
-});
-
-test('analyzeContextReferences: counts #selection references', () => {
-    const refs = emptyRefs();
-    analyzeContextReferences('look at #selection please', refs);
-    assert.equal(refs.selection, 1);
-});
-
-test('analyzeContextReferences: counts @workspace references', () => {
-    const refs = emptyRefs();
-    analyzeContextReferences('search @workspace for this', refs);
-    assert.equal(refs.workspace, 1);
-});
-
-test('analyzeContextReferences: counts @terminal references', () => {
-    const refs = emptyRefs();
-    analyzeContextReferences('what does @terminal say?', refs);
-    assert.equal(refs.terminal, 1);
-});
-
-test('analyzeContextReferences: counts #codebase references', () => {
-    const refs = emptyRefs();
-    analyzeContextReferences('search #codebase for tests', refs);
-    assert.equal(refs.codebase, 1);
-});
-
-test('analyzeContextReferences: counts #changes references', () => {
-    const refs = emptyRefs();
-    analyzeContextReferences('review #changes please', refs);
-    assert.equal(refs.changes, 1);
-});
-
-test('analyzeContextReferences: counts #clipboard references', () => {
-    const refs = emptyRefs();
-    analyzeContextReferences('use #clipboard content', refs);
-    assert.equal(refs.clipboard, 1);
-});
-
-test('analyzeContextReferences: counts #terminalLastCommand references', () => {
-    const refs = emptyRefs();
-    analyzeContextReferences('fix #terminalLastCommand error', refs);
-    assert.equal(refs.terminalLastCommand, 1);
-});
-
-test('analyzeContextReferences: counts #outputPanel references', () => {
-    const refs = emptyRefs();
-    analyzeContextReferences('check #outputPanel', refs);
-    assert.equal(refs.outputPanel, 1);
-});
-
-test('analyzeContextReferences: counts #problemsPanel references', () => {
-    const refs = emptyRefs();
-    analyzeContextReferences('fix #problemsPanel errors', refs);
-    assert.equal(refs.problemsPanel, 1);
-});
-
-test('analyzeContextReferences: counts #pr references', () => {
-    const refs = emptyRefs();
-    analyzeContextReferences('review #pr changes', refs);
-    assert.equal(refs.pullRequest, 1);
-});
-
-test('analyzeContextReferences: counts #pullRequest references', () => {
-    const refs = emptyRefs();
-    analyzeContextReferences('summarize #pullRequest please', refs);
-    assert.equal(refs.pullRequest, 1);
-});
-
-test('analyzeContextReferences: #pr does not match #problemsPanel', () => {
-    const refs = emptyRefs();
-    analyzeContextReferences('check #problemsPanel', refs);
-    assert.equal(refs.pullRequest, 0);
-    assert.equal(refs.problemsPanel, 1);
-});
-
-test('analyzeContextReferences: accumulates on existing counts', () => {
-    const refs = emptyRefs();
-    refs.file = 2;
-    analyzeContextReferences('check #file for context', refs);
-    assert.equal(refs.file, 3);
-});
-
-test('analyzeContextReferences: empty text produces no counts', () => {
-    const refs = emptyRefs();
-    analyzeContextReferences('', refs);
-    assert.equal(refs.file, 0);
-    assert.equal(refs.workspace, 0);
-});
-
-test('analyzeContextReferences: matching is case-insensitive', () => {
-    const refs = emptyRefs();
-    analyzeContextReferences('#FILE and #File and #file', refs);
-    assert.equal(refs.file, 3);
-});
-
-// ---------------------------------------------------------------------------
-// deriveConversationPatterns
-// ---------------------------------------------------------------------------
-
-test('deriveConversationPatterns: 0 requests produces single-turn=0, multi-turn=0', () => {
-    const analysis = emptyAnalysis();
-    deriveConversationPatterns(analysis);
-    assert.ok(analysis.conversationPatterns);
-    assert.equal(analysis.conversationPatterns.singleTurnSessions, 0);
-    assert.equal(analysis.conversationPatterns.multiTurnSessions, 0);
-    assert.equal(analysis.conversationPatterns.avgTurnsPerSession, 0);
-});
-
-test('deriveConversationPatterns: 1 request produces single-turn session', () => {
-    const analysis = emptyAnalysis();
-    analysis.modeUsage.ask = 1;
-    deriveConversationPatterns(analysis);
-    assert.equal(analysis.conversationPatterns!.singleTurnSessions, 1);
-    assert.equal(analysis.conversationPatterns!.multiTurnSessions, 0);
-    assert.equal(analysis.conversationPatterns!.avgTurnsPerSession, 1);
-});
-
-test('deriveConversationPatterns: 3 requests produces multi-turn session', () => {
-    const analysis = emptyAnalysis();
-    analysis.modeUsage.ask = 2;
-    analysis.modeUsage.agent = 1;
-    deriveConversationPatterns(analysis);
-    assert.equal(analysis.conversationPatterns!.multiTurnSessions, 1);
-    assert.equal(analysis.conversationPatterns!.singleTurnSessions, 0);
-    assert.equal(analysis.conversationPatterns!.avgTurnsPerSession, 3);
-    assert.equal(analysis.conversationPatterns!.maxTurnsInSession, 3);
-});
-
-// ---------------------------------------------------------------------------
-// analyzeContentReferences
-// ---------------------------------------------------------------------------
-
-test('analyzeContentReferences: non-array input is ignored', () => {
-    const refs = emptyRefs();
-    analyzeContentReferences(null as any, refs);
-    analyzeContentReferences('string' as any, refs);
-    assert.equal(refs.file, 0);
-    assert.equal(refs.symbol, 0);
-});
-
-test('analyzeContentReferences: empty array produces no counts', () => {
-    const refs = emptyRefs();
-    analyzeContentReferences([], refs);
-    assert.equal(refs.file, 0);
-    assert.deepEqual(refs.byKind, {});
-});
-
-test('analyzeContentReferences: tracks byKind for each entry', () => {
-    const refs = emptyRefs();
-    analyzeContentReferences([
-        { kind: 'reference', reference: { fsPath: '/src/foo.ts' } },
-        { kind: 'reference', reference: { fsPath: '/src/bar.ts' } },
-    ], refs);
-    assert.equal(refs.byKind['reference'], 2);
-});
-
-test('analyzeContentReferences: increments file for regular file reference', () => {
-    const refs = emptyRefs();
-    analyzeContentReferences([
-        { kind: 'reference', reference: { fsPath: '/src/foo.ts' } },
-    ], refs);
-    assert.equal(refs.file, 1);
-    assert.equal(refs.byPath['/src/foo.ts'], 1);
-});
-
-test('analyzeContentReferences: increments copilotInstructions for copilot-instructions.md', () => {
-    const refs = emptyRefs();
-    analyzeContentReferences([
-        { kind: 'reference', reference: { fsPath: '/repo/.github/copilot-instructions.md' } },
-    ], refs);
-    assert.equal(refs.copilotInstructions, 1);
-    assert.equal(refs.file, 0);
-});
-
-test('analyzeContentReferences: increments copilotInstructions for .instructions.md files', () => {
-    const refs = emptyRefs();
-    analyzeContentReferences([
-        { kind: 'reference', reference: { fsPath: '/repo/.github/instructions/github-actions.instructions.md' } },
-    ], refs);
-    assert.equal(refs.copilotInstructions, 1);
-    assert.equal(refs.file, 0);
-});
-
-test('analyzeContentReferences: increments agentsMd for agents.md', () => {
-    const refs = emptyRefs();
-    analyzeContentReferences([
-        { kind: 'reference', reference: { fsPath: '/repo/agents.md' } },
-    ], refs);
-    assert.equal(refs.agentsMd, 1);
-    assert.equal(refs.file, 0);
-});
-
-test('analyzeContentReferences: increments symbol for named reference without fsPath', () => {
-    const refs = emptyRefs();
-    analyzeContentReferences([
-        { kind: 'reference', reference: { name: 'myFunction' } },
-    ], refs);
-    assert.equal(refs.symbol, 1);
-    assert.equal(refs.byPath['#sym:myFunction'], 1);
-});
-
-test('analyzeContentReferences: handles inlineReference kind with fsPath', () => {
-    const refs = emptyRefs();
-    analyzeContentReferences([
-        { kind: 'inlineReference', inlineReference: { fsPath: '/src/component.ts' } },
-    ], refs);
-    assert.equal(refs.file, 1);
-});
-
-test('analyzeContentReferences: increments pullRequest for pullRequest kind', () => {
-    const refs = emptyRefs();
-    analyzeContentReferences([
-        { kind: 'pullRequest', pullRequest: { number: 42, title: 'My PR' } },
-    ], refs);
-    assert.equal(refs.pullRequest, 1);
-    assert.equal(refs.byKind['pullRequest'], 1);
-});
-
-test('analyzeContentReferences: multiple pullRequest entries accumulate', () => {
-    const refs = emptyRefs();
-    analyzeContentReferences([
-        { kind: 'pullRequest', pullRequest: { number: 1 } },
-        { kind: 'pullRequest', pullRequest: { number: 2 } },
-    ], refs);
-    assert.equal(refs.pullRequest, 2);
-});
-
-// ---------------------------------------------------------------------------
-// analyzeVariableData
-// ---------------------------------------------------------------------------
-
-test('analyzeVariableData: null input is ignored', () => {
-    const refs = emptyRefs();
-    analyzeVariableData(null, refs);
-    assert.equal(refs.symbol, 0);
-    assert.deepEqual(refs.byKind, {});
-});
-
-test('analyzeVariableData: non-array variables is ignored', () => {
-    const refs = emptyRefs();
-    analyzeVariableData({ variables: 'not-an-array' }, refs);
-    assert.equal(refs.symbol, 0);
-});
-
-test('analyzeVariableData: tracks byKind for each variable', () => {
-    const refs = emptyRefs();
-    analyzeVariableData({
-        variables: [
-            { kind: 'file', name: 'foo.ts' },
-            { kind: 'file', name: 'bar.ts' },
-        ]
-    }, refs);
-    assert.equal(refs.byKind['file'], 2);
-});
-
-test('analyzeVariableData: file variables also increment refs.file', () => {
-    const refs = emptyRefs();
-    analyzeVariableData({
-        variables: [
-            { kind: 'file', name: 'foo.ts' },
-            { kind: 'file', name: 'bar.ts' },
-        ]
-    }, refs);
-    assert.equal(refs.file, 2);
-});
-
-test('analyzeVariableData: image variables increment byKind[image] and byKind[copilot.image]', () => {
-    const refs = emptyRefs();
-    analyzeVariableData({
-        variables: [
-            { kind: 'image' },
-            { kind: 'image' },
-        ]
-    }, refs);
-    assert.equal(refs.byKind['image'], 2);
-    assert.equal(refs.byKind['copilot.image'], 2);
-});
-
-test('analyzeVariableData: increments symbol for generic sym: variables', () => {
-    const refs = emptyRefs();
-    analyzeVariableData({
-        variables: [
-            { kind: 'generic', name: 'sym:parseSessionFile' },
-        ]
-    }, refs);
-    assert.equal(refs.symbol, 1);
-    assert.equal(refs.byPath['#sym:parseSessionFile'], 1);
-});
-
-test('analyzeVariableData: does not increment symbol for generic without sym: prefix', () => {
-    const refs = emptyRefs();
-    analyzeVariableData({
-        variables: [
-            { kind: 'generic', name: 'someOtherThing' },
-        ]
-    }, refs);
-    assert.equal(refs.symbol, 0);
-});
-
-// ---------------------------------------------------------------------------
-// analyzeCliAttachments
-// ---------------------------------------------------------------------------
-
-test('analyzeCliAttachments: null/missing input is ignored', () => {
-    const refs = emptyRefs();
-    analyzeCliAttachments(null, refs);
-    analyzeCliAttachments(undefined, refs);
-    assert.equal(refs.file, 0);
-    assert.deepEqual(refs.byKind, {});
-});
-
-test('analyzeCliAttachments: clipboard PNG increments copilot.image', () => {
-    const refs = emptyRefs();
-    analyzeCliAttachments([
-        { displayName: 'bce9bcb7-35f8-49ba-a49d-a8114dd26214-clipboard.png', type: 'file' },
-        { displayName: '3a695656-0157-4e9d-8613-781da1b54ee7-clipboard.png', type: 'file' },
-    ], refs);
-    assert.equal(refs.byKind['copilot.image'], 2);
-    assert.equal(refs.file, 0);
-});
-
-test('analyzeCliAttachments: "N lines" displayName increments refs.file', () => {
-    const refs = emptyRefs();
-    analyzeCliAttachments([
-        { displayName: '210 lines', type: 'file' },
-        { displayName: '46 lines', type: 'file' },
-    ], refs);
-    assert.equal(refs.file, 2);
-    assert.equal(refs.byKind['copilot.image'], undefined);
-});
-
-test('analyzeCliAttachments: named file (e.g. refactor.agent.md) increments refs.file', () => {
-    const refs = emptyRefs();
-    analyzeCliAttachments([
-        { displayName: 'refactor.agent.md', type: 'file' },
-    ], refs);
-    assert.equal(refs.file, 1);
-});
-
-test('analyzeCliAttachments: mixed attachments (images + file refs) split correctly', () => {
-    const refs = emptyRefs();
-    analyzeCliAttachments([
-        { displayName: 'abc-clipboard.png', type: 'file' },
-        { displayName: '285 lines', type: 'file' },
-        { displayName: 'AGENTS.md', type: 'file' },
-    ], refs);
-    assert.equal(refs.byKind['copilot.image'], 1);
-    assert.equal(refs.file, 2);
-});
-
-test('analyzeCliAttachments: entry without displayName is skipped', () => {
-    const refs = emptyRefs();
-    analyzeCliAttachments([{ type: 'file' }, null, 42], refs);
-    assert.equal(refs.file, 0);
-    assert.deepEqual(refs.byKind, {});
-});
-
-// ---------------------------------------------------------------------------
-// analyzeRequestContext
-// ---------------------------------------------------------------------------
-
-test('analyzeRequestContext: processes message.text for context refs', () => {
-    const refs = emptyRefs();
-    analyzeRequestContext({ message: { text: 'look at #file please' } }, refs);
-    assert.equal(refs.file, 1);
-});
-
-test('analyzeRequestContext: processes message.parts for context refs', () => {
-    const refs = emptyRefs();
-    analyzeRequestContext({
-        message: { parts: [{ text: 'check #codebase' }, { text: 'and #file' }] }
-    }, refs);
-    assert.equal(refs.codebase, 1);
-    assert.equal(refs.file, 1);
-});
-
-test('analyzeRequestContext: extracts code context lines from dynamic parts', () => {
-    const refs = emptyRefs();
-    analyzeRequestContext({
-        message: {
-            parts: [{
-                kind: 'dynamic',
-                data: { range: { startLineNumber: 10, endLineNumber: 24 } },
-            }]
-        }
-    }, refs);
-    assert.equal(refs.codeContextLines, 15);
-});
-
-test('analyzeRequestContext: counts custom prompt parts in byKind', () => {
-    const refs = emptyRefs();
-    analyzeRequestContext({
-        message: {
-            parts: [{
-                kind: 'prompt',
-                slashPromptCommand: { command: 'galery' },
-            }]
-        }
-    }, refs);
-    assert.equal(refs.byKind['prompt'], 1);
-});
-
-test('analyzeRequestContext: processes contentReferences array', () => {
-    const refs = emptyRefs();
-    analyzeRequestContext({
-        contentReferences: [
-            { kind: 'reference', reference: { fsPath: '/src/utils.ts' } },
-        ]
-    }, refs);
-    assert.equal(refs.file, 1);
-});
-
-test('analyzeRequestContext: processes variableData for symbol refs', () => {
-    const refs = emptyRefs();
-    analyzeRequestContext({
-        variableData: {
-            variables: [{ kind: 'generic', name: 'sym:myClass' }]
-        }
-    }, refs);
-    assert.equal(refs.symbol, 1);
-});
-
-test('analyzeRequestContext: empty request produces no counts', () => {
-    const refs = emptyRefs();
-    analyzeRequestContext({}, refs);
-    assert.equal(refs.file, 0);
-    assert.equal(refs.symbol, 0);
 });
 
 // ---------------------------------------------------------------------------
@@ -3833,4 +3423,74 @@ test('analyzeSessionUsage: an untagged MCP start (name-recognised, no mcpServerN
     assert.equal(result.toolCalls.completedByTool, undefined, 'nothing leaks into the per-tool maps');
     assert.equal(result.toolCalls.failuresByTool, undefined);
     assert.equal(result.toolCalls.latencyByTool, undefined);
+});
+
+test('analyzeSessionUsage: onAnalysisError fires only when the session could not be analyzed', async () => {
+	const warnings: string[] = [];
+	const errors: unknown[] = [];
+	const deps: UsageAnalysisDeps = {
+		warn: (msg) => { warnings.push(msg); },
+		onAnalysisError: (error) => { errors.push(error); },
+		ecosystems: [], tokenEstimators: {}, modelPricing: {}, toolNameMap: {},
+	};
+
+	// A non-fatal notice: the format is unexpected, the (empty) analysis is still the answer.
+	await analyzeSessionUsage(deps, 'unexpected-format.json', JSON.stringify({ requests: 'not-an-array' }));
+	assert.equal(warnings.length, 1, 'the unexpected format is reported as a warning');
+	assert.equal(errors.length, 0, 'a warning alone is not an analysis failure');
+
+	// A real failure: the file cannot be read, so the empty analysis stands in for one that failed.
+	// A path that does not exist next to this test, not one under os.tmpdir(): the OS temp dir
+	// is shared and attacker-writable, and nothing here needs it.
+	const missing = path.join(__dirname, 'no-such-dir', 'missing-session.json');
+	const result = await analyzeSessionUsage(deps, missing);
+	assert.equal(errors.length, 1, 'an unreadable session signals onAnalysisError');
+	assert.ok(result.taskClassification, 'callers still get a well-formed empty analysis');
+});
+
+test('analyzeSessionUsage: Copilot Chat JSON turn windows fill the per-model latency histogram', async () => {
+    const t0 = Date.parse('2026-05-01T10:00:00Z');
+    const content = JSON.stringify({
+        requests: [
+            { modelId: 'copilot/gpt-4o', timestamp: t0, message: { text: 'a' }, result: { promptTokens: 10, outputTokens: 300, timings: { totalElapsed: 10_000 } } },
+            { modelId: 'copilot/gpt-4o', timestamp: t0 + 60_000, message: { text: 'b' }, result: { promptTokens: 10, outputTokens: 100, timings: { totalElapsed: 10_000 } } },
+        ]
+    });
+    const result = await analyzeSessionUsage(makeMockDeps(), FAKE_JSON_PATH, content);
+    const counters = result.modelEfficiency?.['gpt-4o'];
+    assert.equal(counters?.turnLatency?.count, 2);
+    assert.equal(counters?.turnLatency?.sumMs, 20_000);
+    assert.equal(counters?.timedOutputTokens, 400);
+    assert.equal(counters?.timedOutputMs, 20_000);
+    assert.equal(result.sessionDuration?.activeDurationMs, 20_000);
+});
+
+test('analyzeSessionUsage: Copilot Chat JSON without timestamps or timings produces no latency histogram', async () => {
+    const content = JSON.stringify({
+        requests: [{ modelId: 'copilot/gpt-4o', message: { text: 'a' }, result: { promptTokens: 10, outputTokens: 5 } }]
+    });
+    const result = await analyzeSessionUsage(makeMockDeps(), FAKE_JSON_PATH, content);
+    assert.equal(result.modelEfficiency?.['gpt-4o']?.turnLatency, undefined);
+    assert.equal(result.sessionDuration?.activeDurationMs, 0);
+});
+
+test('analyzeSessionUsage: Copilot CLI turns end at their last assistant/tool event and yield active duration', async () => {
+    const events = [
+        { type: 'session.start', data: { selectedModel: 'claude-sonnet-5' }, timestamp: '2026-05-01T10:00:00Z' },
+        { type: 'user.message', data: { content: 'one' }, timestamp: '2026-05-01T10:00:05Z' },
+        { type: 'tool.execution_start', data: { toolCallId: 'c1', toolName: 'view', arguments: { path: 'a.ts' } }, timestamp: '2026-05-01T10:00:08Z' },
+        { type: 'tool.execution_complete', data: { toolCallId: 'c1', success: true, result: { content: 'x' } }, timestamp: '2026-05-01T10:00:10Z' },
+        { type: 'assistant.message', data: { content: 'done', outputTokens: 200 }, timestamp: '2026-05-01T10:00:15Z' },
+        { type: 'session.shutdown', data: {}, timestamp: '2026-05-01T11:30:00Z' },
+        { type: 'user.message', data: { content: 'two' }, timestamp: '2026-05-01T12:00:00Z' },
+    ];
+    const content = events.map(e => JSON.stringify(e)).join('\n');
+    const result = await analyzeSessionUsage(makeMockDeps(), '/home/user/.copilot/session-state/abc/events.jsonl', content);
+    const counters = result.modelEfficiency?.['claude-sonnet-5'];
+    // Turn one: 10:00:05 -> 10:00:15 (shutdown is not response work); turn two has no response event, so it is untimed.
+    assert.equal(counters?.calls, 2);
+    assert.equal(counters?.turnLatency?.count, 1);
+    assert.equal(counters?.turnLatency?.sumMs, 10_000);
+    assert.equal(counters?.timedOutputTokens, 200);
+    assert.equal(result.sessionDuration?.activeDurationMs, 10_000);
 });

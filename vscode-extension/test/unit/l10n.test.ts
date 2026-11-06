@@ -6,11 +6,33 @@ import { join } from 'node:path';
 import * as vscode from 'vscode';
 import { t } from '../../src/l10n';
 import { ENGLISH_BUNDLE, resolvedLocale } from '../../src/l10nCore';
-import { INSIGHT_CATALOG, evaluateInsights } from '../../src/insightsEngine';
+import { INSIGHT_CATALOG, evaluateInsights } from '../../../src/insightsEngine';
 import { insightFixtureContexts } from './fixtures/insightContexts';
 import { WHATS_NEW_RELEASES } from '../../src/whatsNew/catalog';
 
 const mock = (vscode as any).__mock;
+
+test('l10n: Copilot Fusion view labels resolve in English and zh-cn', () => {
+	const translations = [
+		['logviewer.hydrafusion.title', 'Copilot Fusion Routing', 'Copilot Fusion 路由'],
+		['logviewer.hydrafusion.intro',
+			'Copilot Fusion answers one prompt with several models — drafting, reviewing and escalating — then hands back a single answer and a single credit figure. The chat above shows that answer; this section shows the legs behind it, reconstructed from the routing decisions the CLI records for its own resume and rewind.',
+			'Copilot Fusion 使用多个模型回答一个提示词，完成起草、评审和升级处理，然后返回一个答案和一个积分数值。上方的聊天显示该答案；本节根据 CLI 为恢复和回退会话而记录的路由决策，还原答案背后的各个环节。'],
+		['usage.sessions.fusion.label', 'Copilot Fusion', 'Copilot Fusion'],
+		['usage.sessions.fusion.filterTooltip', 'Show only sessions that used Copilot Fusion', '仅显示使用了 Copilot Fusion 的会话'],
+		['usage.sessions.fusion.badgeTooltip', 'This session used Copilot Fusion', '此会话使用了 Copilot Fusion'],
+	];
+	try {
+		for (const [language, column] of [['en', 1], ['zh-cn', 2]] as const) {
+			mock.setLanguage(language);
+			for (const entry of translations) {
+				assert.equal(t(entry[0]), entry[column]);
+			}
+		}
+	} finally {
+		mock.setLanguage('en');
+	}
+});
 
 // The shim's default l10n.t returns the raw key — exactly what real VS Code
 // does for key-based calls on the default (English) display language.
@@ -97,6 +119,11 @@ test('l10n: customization files table controls resolve in English and zh-cn', ()
 		['usage.customization.status.unknown', "Status unknown", "状态未知"],
 		['usage.customization.status.error', "Error", "错误"],
 		['usage.customization.badge.noCustomization', "No customization files", "没有自定义文件"],
+		['badge.preview.title', 'Chart preview', '图表预览'],
+		['badge.preview.chartLabel', 'Daily tokens over the last {0} days', '最近 {0} 天的每日令牌数'],
+		['badge.preview.summary', 'Last {0} days · {1} tokens · {2} sessions', '最近 {0} 天 · {1} 个令牌 · {2} 次会话'],
+		['badge.range.label', 'History', '历史范围'],
+		['badge.range.days', '{0} days', '{0} 天'],
 		['usage.customization.legend.fresh', "= Present & Fresh", "= 存在且最新"],
 		['usage.customization.legend.stale', "= Present but Stale", "= 存在但已过时"],
 		['usage.customization.legend.missing', "= Missing", "= 缺失"],
@@ -261,14 +288,15 @@ test('l10n: tool curation UI strings resolve in English and zh-cn', () => {
 });
 
 test('l10n: AI Readiness command and navigation labels resolve in both languages', () => {
-	assert.equal(t('command.showReadiness.title'), 'Show AI Readiness');
-	assert.equal(t('nav.btnReadiness'), 'AI Readiness');
+	assert.equal(t('command.showReadiness.title'), 'Show AI Readiness (Usage Analysis)');
+	assert.equal(t('usage.tab.readiness'), 'AI Readiness');
 	assert.equal(t('readiness.loading'), 'Scanning repository controls…');
 	assert.equal(t('readiness.refreshing'), 'Showing the last scan while a fresh one runs…');
 	assert.equal(t('readiness.scanFailed'), 'Could not scan repository readiness. Check the AI Engineering Fluency output for details, then try Refresh.');
 	assert.equal(t('whatsNew.release.0.18.1.headline'), 'A maintenance release: friendly tool names, localization groundwork, and a Mistral Vibe cost-attribution fix. No new screens.');
 	assert.equal(t('whatsNew.release.0.18.2.headline'), 'See which repository controls are in place, and which still need evidence, in the new AI Readiness tab.');
 	assert.equal(t('whatsNew.release.0.18.3.headline'), 'A maintenance release: the AI Readiness tab now collapses each repository to one row and can draft a Copilot Chat prompt for the controls you pick, plus friendlier MCP tool names. No new screens.');
+	assert.equal(t('whatsNew.release.0.19.2.headline'), 'A maintenance release: Badge Setup now previews your fluency chart with a 30/90-day range and guides you to install the badge app before syncing. No new screens.');
 	assert.equal(t('whatsNew.feature.usage.readiness-tab.title'), 'AI Readiness');
 	assert.equal(t('whatsNew.feature.usage.readiness-tab.description'), "In Usage Analysis, scan each repository's delivery and governance controls to see what blocks its next stage and what could not be checked. Separate from your personal Fluency Score.");
 	assert.equal(t('whatsNew.release.0.19.0.headline'), "Usage Analysis is now organized into Usage, Workspace, GitHub and Coaching groups, with banded sections, official editor logos in the Chart view and Copilot budget for every signed-in GitHub account.");
@@ -276,14 +304,15 @@ test('l10n: AI Readiness command and navigation labels resolve in both languages
 	assert.equal(t('whatsNew.feature.usage.group-tabs.description'), "The ten Usage Analysis tabs now sit under four group tabs (Usage, Workspace, GitHub, Coaching), and My Activity is split into Overview, Spend & models and Context bands.");
 	mock.setLanguage('zh-cn');
 	try {
-		assert.equal(t('command.showReadiness.title'), '显示 AI 就绪度');
-		assert.equal(t('nav.btnReadiness'), 'AI 就绪度');
+		assert.equal(t('command.showReadiness.title'), '显示 AI 就绪度（使用分析）');
+		assert.equal(t('usage.tab.readiness'), 'AI 就绪度');
 		assert.equal(t('readiness.loading'), '正在扫描仓库控制措施…');
 		assert.equal(t('readiness.refreshing'), '正在显示上次扫描结果，同时重新扫描…');
 		assert.equal(t('readiness.scanFailed'), '无法扫描仓库就绪度。请查看 AI 工程熟练度输出中的详细信息，然后重试刷新。');
 		assert.equal(t('whatsNew.release.0.18.1.headline'), '一个维护版本：友好的工具名称、本地化基础工作，以及一个 Mistral Vibe 成本归因修复。没有新增界面。');
 		assert.equal(t('whatsNew.release.0.18.2.headline'), '在新的 AI 就绪度标签页中，查看仓库已具备的控制措施以及仍需核实的证据。');
 		assert.equal(t('whatsNew.release.0.18.3.headline'), '一个维护版本：AI 就绪度标签页现在将每个仓库折叠为一行，并可为你选中的控制措施起草 Copilot Chat 提示，另外 MCP 工具名称更友好。没有新增界面。');
+		assert.equal(t('whatsNew.release.0.19.2.headline'), '一个维护版本：徽章设置现在可预览你的熟练度图表（30/90 天范围），并引导你先安装徽章应用再同步。没有新增界面。');
 		assert.equal(t('whatsNew.feature.usage.readiness-tab.title'), 'AI 就绪度');
 		assert.equal(t('whatsNew.feature.usage.readiness-tab.description'), '在使用分析中逐个扫描仓库的交付与治理控制措施，查看进入下一阶段的阻碍和无法核实的项目。与个人熟练度评分分开显示。');
 		assert.equal(t('whatsNew.release.0.19.0.headline'), "使用分析现在按“使用”“工作区”“GitHub”“辅导”分组，各部分按区块排列；图表视图显示官方编辑器图标，并为每个已登录的 GitHub 账户显示 Copilot 预算。");
@@ -535,9 +564,23 @@ test('l10n: usage tab-group, band and context-reference keys resolve in English'
 		'usage.tab.health': 'Workspace Health',
 		'usage.tab.repos': 'Repository PRs',
 		'usage.tab.agent': 'Cloud Agent',
+		'usage.tab.billing': 'Billing',
+		'usage.modelCost.tier.low': 'Low cost',
+		'usage.modelCost.tier.medium': 'Medium cost',
+		'usage.modelCost.tier.high': 'High cost',
+		'usage.modelCost.tier.unknown': 'Unknown',
+		'usage.billing.title': 'AI Billing Coverage',
+		'usage.billing.subtitle': 'Compare what the GitHub Copilot API reports across all channels with what the extension can track from local IDE session logs.',
+		'usage.billing.providerCostsHint': 'Estimated costs per provider are in the Details view.',
+		'usage.billing.openDetails': 'Open Cost by Provider',
+		'usage.billing.signInRequired': 'GitHub authentication required',
+		'usage.billing.signInHint': 'Sign in with GitHub (Diagnostics › Settings › GitHub Auth) to see your Copilot AI credit balance and budgets.',
 		'usage.tab.worktrees': 'Worktrees',
 		'usage.tab.insights': 'Insights',
 		'usage.tab.corrections': 'Corrections',
+		'usage.customAgents.title': 'Custom Agents',
+		'usage.efficiency.freshInput.label': 'Fresh in',
+		'usage.customAgents.none': 'No custom agent used',
 		'usage.band.overview.title': 'Overview',
 		'usage.band.spend.title': 'Spend & models',
 		'usage.band.context.title': 'Context',
@@ -582,9 +625,23 @@ test('l10n: usage tab-group, band and context-reference keys resolve in zh-cn', 
 			'usage.tab.health': '工作区健康度',
 			'usage.tab.repos': '仓库 PR',
 			'usage.tab.agent': '云端代理',
+			'usage.tab.billing': '计费',
+			'usage.modelCost.tier.low': '低成本',
+			'usage.modelCost.tier.medium': '中等成本',
+			'usage.modelCost.tier.high': '高成本',
+			'usage.modelCost.tier.unknown': '未知',
+			'usage.billing.title': 'AI 计费覆盖',
+			'usage.billing.subtitle': '比较 GitHub Copilot API 报告的所有渠道用量与扩展可从本地 IDE 会话日志跟踪的用量。',
+			'usage.billing.providerCostsHint': '各提供商的估算费用位于“详细信息”视图中。',
+			'usage.billing.openDetails': '打开“按提供商划分的费用”',
+			'usage.billing.signInRequired': '需要 GitHub 身份验证',
+			'usage.billing.signInHint': '通过 GitHub 登录（Diagnostics › Settings › GitHub Auth）以查看 Copilot AI 额度余额和预算。',
 			'usage.tab.worktrees': '工作树',
 			'usage.tab.insights': '洞察',
 			'usage.tab.corrections': '纠正',
+			'usage.customAgents.title': '自定义代理',
+			'usage.efficiency.freshInput.label': '新输入',
+			'usage.customAgents.none': '未使用自定义代理',
 			'usage.band.overview.title': '概览',
 			'usage.band.spend.title': '花费与模型',
 			'usage.band.context.title': '上下文',
@@ -985,20 +1042,20 @@ test('l10n: Cost Attribution model-mix table labels resolve in zh-cn', () => {
 	}
 });
 
-// HydraFusion Routing section + Session Steps Overview leg toggle (PR #2059
+// Copilot Fusion Routing section + Session Steps Overview leg toggle (PR #2059
 // follow-up) — guards against raw keys resurfacing in the new cost/leg UI.
-test('l10n: HydraFusion routing keys resolve in English', () => {
+test('l10n: Copilot Fusion routing keys resolve in English', () => {
 	const expected: Record<string, string> = {
 		'logviewer.hydrafusion.cost': 'Cost',
 		'logviewer.hydrafusion.costForTurn': 'Cost for this turn',
 		'logviewer.hydrafusion.jumpToStepTitle': 'Jump to step #{0} in the Session Steps Overview below',
 		'logviewer.hydrafusion.jumpToStepLabel': 'step #{0}',
 		'logviewer.hydrafusion.turnDetailIntro': 'Expand a turn to see each leg, what it decided, and what it cost. ● marks the leg whose output you actually received; ✗ marks a leg a judge rejected. The same legs also appear under their step in the Session Steps Overview below.',
-		'logviewer.hydrafusion.toggleLegsAriaLabel': 'Toggle HydraFusion legs for step #{0}',
-		'logviewer.hydrafusion.showLegsTitle': 'Show the HydraFusion legs behind this step',
-		'logviewer.hydrafusion.legsCaptionTotal': '⚡ HydraFusion legs for step #{0} — total',
+		'logviewer.hydrafusion.toggleLegsAriaLabel': 'Toggle Copilot Fusion legs for step #{0}',
+		'logviewer.hydrafusion.showLegsTitle': 'Show the Copilot Fusion legs behind this step',
+		'logviewer.hydrafusion.legsCaptionTotal': '⚡ Copilot Fusion legs for step #{0} — total',
 		'logviewer.hydrafusion.modelChangedTitle': 'Model changed from the previous step',
-		'logviewer.hydrafusion.expandStepNote': '⚡ expand a step to see the HydraFusion legs behind it',
+		'logviewer.hydrafusion.expandStepNote': '⚡ expand a step to see the Copilot Fusion legs behind it',
 	};
 	for (const [key, english] of Object.entries(expected)) {
 		assert.equal(t(key), english, `English value for ${key}`);
@@ -1055,7 +1112,7 @@ test('l10n: main refresh loading step labels resolve in zh-cn', () => {
 });
 
 
-test('l10n: HydraFusion routing keys resolve in zh-cn', () => {
+test('l10n: Copilot Fusion routing keys resolve in zh-cn', () => {
 	mock.setLanguage('zh-cn');
 	try {
 		const expected: Record<string, string> = {
@@ -1064,11 +1121,11 @@ test('l10n: HydraFusion routing keys resolve in zh-cn', () => {
 			'logviewer.hydrafusion.jumpToStepTitle': '跳转到下方会话步骤概览中的第 {0} 步',
 			'logviewer.hydrafusion.jumpToStepLabel': '第 {0} 步',
 			'logviewer.hydrafusion.turnDetailIntro': '展开一轮以查看每个环节、它做出的决定以及它的花费。● 标记你实际收到输出的环节；✗ 标记被评审拒绝的环节。相同的环节也会出现在下方会话步骤概览中对应的步骤下。',
-			'logviewer.hydrafusion.toggleLegsAriaLabel': '切换第 {0} 步的 HydraFusion 环节',
-			'logviewer.hydrafusion.showLegsTitle': '显示此步骤背后的 HydraFusion 环节',
-			'logviewer.hydrafusion.legsCaptionTotal': '⚡ 第 {0} 步的 HydraFusion 环节 — 总计',
+			'logviewer.hydrafusion.toggleLegsAriaLabel': '切换第 {0} 步的 Copilot Fusion 环节',
+			'logviewer.hydrafusion.showLegsTitle': '显示此步骤背后的 Copilot Fusion 环节',
+			'logviewer.hydrafusion.legsCaptionTotal': '⚡ 第 {0} 步的 Copilot Fusion 环节 — 总计',
 			'logviewer.hydrafusion.modelChangedTitle': '模型较上一步已更改',
-			'logviewer.hydrafusion.expandStepNote': '⚡ 展开某一步以查看其背后的 HydraFusion 环节',
+			'logviewer.hydrafusion.expandStepNote': '⚡ 展开某一步以查看其背后的 Copilot Fusion 环节',
 		};
 		for (const [key, chinese] of Object.entries(expected)) {
 			assert.equal(t(key), chinese, `zh-cn value for ${key}`);
@@ -1134,6 +1191,9 @@ test('l10n: Efficiency Models tab control labels resolve in English and zh-cn', 
 		'efficiency.models.controls.window': 'Window',
 		'efficiency.models.mode.models': 'Compare two models',
 		'efficiency.models.mode.periods': 'One model, two periods',
+		'efficiency.models.mode.harnesses': 'One model, two harnesses',
+		'efficiency.models.controls.harnessA': 'Harness A',
+		'efficiency.models.controls.harnessB': 'Harness B',
 	};
 	for (const [key, value] of Object.entries(english)) {
 		assert.equal(t(key), value, `English value for ${key}`);
@@ -1151,6 +1211,9 @@ test('l10n: Efficiency Models tab control labels resolve in English and zh-cn', 
 			'efficiency.models.controls.window': '\u65f6\u95f4\u7a97\u53e3',
 			'efficiency.models.mode.models': '\u5bf9\u6bd4\u4e24\u4e2a\u6a21\u578b',
 			'efficiency.models.mode.periods': '\u5355\u4e2a\u6a21\u578b\uff0c\u4e24\u4e2a\u65f6\u6bb5',
+			'efficiency.models.mode.harnesses': '\u5355\u4e2a\u6a21\u578b\uff0c\u4e24\u79cd\u5de5\u5177',
+			'efficiency.models.controls.harnessA': '\u5de5\u5177 A',
+			'efficiency.models.controls.harnessB': '\u5de5\u5177 B',
 		};
 		for (const [key, value] of Object.entries(chinese)) {
 			assert.equal(t(key), value, `zh-cn value for ${key}`);
@@ -1570,7 +1633,7 @@ test('insights l10n: the bundle carries no orphaned insight keys', () => {
 	// engine's source.
 	// Tests run compiled out of `out/`, so __dirname does not sit next to the
 	// real source tree — same hop the other source-reading tests use.
-	const source = readFileSync(join(__dirname, '../../../../src/insightsEngine.ts'), 'utf8');
+	const source = readFileSync(join(__dirname, '../../../../../src/insightsEngine.ts'), 'utf8');
 	const orphans = insightKeys().filter(key => {
 		const parts = key.split('.');
 		// Try the full key, then progressively shorter prefixes, down to the two
@@ -1805,12 +1868,10 @@ test('l10n: efficiency scope toolbar labels resolve in English', () => {
 		'efficiency.scope.allEditors': 'All editors',
 		'efficiency.scope.vendorLabel': 'Model vendor',
 		'efficiency.scope.allVendors': 'All vendors',
-		'efficiency.scope.drillLabel': 'Drill',
-		'efficiency.scope.drillPlaceholder': 'Drill into…',
 		'efficiency.scope.back': '↩ Back',
 		'efficiency.scope.backAria': 'Back to the previous range',
-		'efficiency.scope.drillHintWeekly': 'Click a week on a chart to drill into its days',
-		'efficiency.scope.drillHintMonthly': 'Click a month on a chart to drill into its days',
+		'efficiency.scope.drillHintWeekly': 'Click a week on a chart, or choose one under “Selected period”, to see its details',
+		'efficiency.scope.drillHintMonthly': 'Click a month on a chart, or choose one under “Selected period”, to see its details',
 		'efficiency.scope.announce': 'Showing {0}.',
 		'efficiency.scope.behaviorGap': '⚠️ Session-derived metrics (active minutes, retry rate, apply rate, skills) are only collected for the last {0} weeks, so earlier buckets in this range show gaps rather than zeros.',
 		'efficiency.scope.editorScoped': 'Scoped to {0}. Sessions whose editor could not be determined are excluded from this view.',
@@ -1846,14 +1907,12 @@ test('l10n: efficiency scope toolbar labels resolve in zh-cn', () => {
 			'efficiency.scope.allEditors': '所有编辑器',
 			'efficiency.scope.vendorLabel': '模型厂商',
 			'efficiency.scope.allVendors': '所有厂商',
-			'efficiency.scope.drillLabel': '下钻',
-			'efficiency.scope.drillPlaceholder': '下钻到…',
 			'efficiency.scope.back': '↩ 返回',
 			'efficiency.scope.backAria': '返回上一个范围',
 			'efficiency.scope.announce': '当前显示：{0}。',
 			'efficiency.scope.timeRangeGroup': '时间范围',
-			'efficiency.scope.drillHintWeekly': '点击图表中的某一周可下钻查看其各天数据',
-			'efficiency.scope.drillHintMonthly': '点击图表中的某一月可下钻查看其各天数据',
+			'efficiency.scope.drillHintWeekly': '点击图表中的某一周或在“所选周期”中选择，可查看其详情',
+			'efficiency.scope.drillHintMonthly': '点击图表中的某一月或在“所选周期”中选择，可查看其详情',
 			'efficiency.scope.behaviorGap': '⚠️ 会话派生指标（活跃分钟数、重试率、应用率、技能）仅收集最近 {0} 周的数据，因此该范围内较早的分桶显示为缺口而非零值。',
 			'efficiency.scope.editorScoped': '已限定为 {0}。无法确定所属编辑器的会话不计入此视图。',
 			'efficiency.scope.noDataFor': '{0}（无数据）',
@@ -1881,6 +1940,86 @@ test('l10n: efficiency placeholder templates keep their {0} slot for localizeFor
 	// The trends intro fills three slots — resolution, range and bucket count.
 	for (const slot of ['{0}', '{1}', '{2}']) {
 		assert.ok(t('efficiency.trends.bucketIntro').includes(slot), `efficiency.trends.bucketIntro must carry a ${slot} placeholder`);
+	}
+});
+
+// Efficiency Models tab section labels, and the toolbar drill picker they outlived.
+test('l10n: efficiency Models section labels resolve in English and zh-CN', () => {
+	const en: Record<string, string> = {
+		'efficiency.models.filtersNote': 'These filters apply to both the comparison and the drift chart below.',
+		'efficiency.models.headToHead.title': 'Head-to-head comparison',
+		'efficiency.models.headToHead.note': 'Compared over the periods you pick in this section. The time range under Drift over time does not change it.',
+		'efficiency.models.drift.title': 'Drift over time',
+		'efficiency.models.drift.note': "{0} values for each side's model over {1}, so a model getting better — or quietly getting worse — is visible. Gaps are buckets where the model was not used. This range only drives this chart and its selected period; the head-to-head comparison above keeps its own window pickers.",
+	};
+	for (const [key, english] of Object.entries(en)) {
+		assert.equal(t(key), english, `en value for ${key}`);
+	}
+	mock.setLanguage('zh-cn');
+	try {
+		const zh: Record<string, string> = {
+			'efficiency.models.filtersNote': '这些筛选条件同时作用于下方的对比和漂移图。',
+			'efficiency.models.headToHead.title': '正面对比',
+			'efficiency.models.headToHead.note': '按你在本节选择的时段进行对比。“随时间的漂移”下的时间范围不会改变它。',
+			'efficiency.models.drift.title': '随时间的漂移',
+			'efficiency.models.drift.note': '{1}内双方模型的{0}数值，便于看出模型是在变好，还是在悄悄变差。空缺表示该模型在对应时间段内未被使用。此范围只影响这张图表及其所选周期；上方的正面对比保留各自的时间窗口选择器。',
+		};
+		for (const [key, chinese] of Object.entries(zh)) {
+			assert.equal(t(key), chinese, `zh-cn value for ${key}`);
+		}
+	} finally {
+		mock.setLanguage('en');
+	}
+});
+
+test('l10n: the efficiency hint names the Selected period control by its label, in both languages', () => {
+	assert.ok(t('efficiency.scope.drillHintWeekly').includes(t('efficiency.detail.pickerLabel')));
+	assert.ok(t('efficiency.scope.drillHintMonthly').includes(t('efficiency.detail.pickerLabel')));
+	mock.setLanguage('zh-cn');
+	try {
+		assert.ok(t('efficiency.scope.drillHintWeekly').includes(t('efficiency.detail.pickerLabel')));
+		assert.ok(t('efficiency.scope.drillHintMonthly').includes(t('efficiency.detail.pickerLabel')));
+	} finally {
+		mock.setLanguage('en');
+	}
+});
+
+// Efficiency selected-period drill-down (issue #1974).
+test('l10n: efficiency selected-period drill-down strings resolve in English and zh-CN', () => {
+	const en: Record<string, string> = {
+		'efficiency.detail.pickerLabel': 'Selected period',
+		'efficiency.detail.showDays': 'Show the days in this period',
+		'efficiency.detail.down': 'down {0}%',
+		'efficiency.detail.unavailable.few-edit-turns': 'Too few edit turns for a reliable rate.',
+		'efficiency.detail.models.lowSample': 'Below the sample floor of {0} session equivalents: ratios are hidden rather than shown unreliable.',
+		'efficiency.context.viewTrend': 'View trend',
+		'efficiency.context.viewModel': 'View in Models',
+	};
+	for (const [key, english] of Object.entries(en)) {
+		assert.equal(t(key), english, `en value for ${key}`);
+	}
+	mock.setLanguage('zh-cn');
+	try {
+		assert.equal(t('efficiency.detail.pickerLabel'), '所选周期');
+		assert.equal(t('efficiency.detail.showDays'), '显示该周期内的每一天');
+		assert.equal(t('efficiency.context.viewTrend'), '查看趋势');
+		assert.equal(t('efficiency.context.viewModel'), '在模型中查看');
+	} finally {
+		mock.setLanguage('en');
+	}
+});
+
+test('l10n: the repeated-task insight names the Insights tab as Skill Suggestions\' location', () => {
+	assert.equal(t('insight.repeatedTaskSkillCandidate.more.one', 1), '1 more repeated task found — see Insights → Skill Suggestions.');
+	assert.equal(t('insight.repeatedTaskSkillCandidate.more.other', 2), '2 more repeated tasks found — see Insights → Skill Suggestions.');
+	assert.equal(t('insight.repeatedTaskSkillCandidate.seeDetails'), 'See Insights → Skill Suggestions for details.');
+	mock.setLanguage('zh-cn');
+	try {
+		assert.equal(t('insight.repeatedTaskSkillCandidate.more.one', 1), '另外还发现 1 个重复任务——请查看洞察 → 技能建议。');
+		assert.equal(t('insight.repeatedTaskSkillCandidate.more.other', 2), '另外还发现 2 个重复任务——请查看洞察 → 技能建议。');
+		assert.equal(t('insight.repeatedTaskSkillCandidate.seeDetails'), '详情请查看洞察 → 技能建议。');
+	} finally {
+		mock.setLanguage('en');
 	}
 });
 
@@ -1974,8 +2113,26 @@ const WORKTREE_CLEANUP_KEYS: Record<string, { en: string; zh: string }> = {
 	'usage.worktreeCleanup.deleting': { en: '⏳ Deleting worktree{0}…', zh: '⏳ 正在删除工作树{0}…' },
 	'usage.worktreeCleanup.deleted': { en: '✅ Deleted', zh: '✅ 已删除' },
 	'usage.worktreeCleanup.deleteFailed': { en: '❌ Delete failed: {0}', zh: '❌ 删除失败：{0}' },
+	'usage.worktreeCleanup.recovered': { en: '{0} recovered', zh: '已回收 {0}' },
+	'usage.worktreeCleanup.copyPrompt': { en: '📋 Copy prompt', zh: '📋 复制提示词' },
+	'usage.worktreeCleanup.copyPromptTitle': { en: 'Copy a starter prompt: open this worktree in VS Code, start a chat session there and paste it to learn what the diff contains', zh: '复制起始提示词：在 VS Code 中打开此工作树，开始聊天会话并粘贴，以了解其中的差异' },
+	'usage.worktreeCleanup.copied': { en: '✅ Copied!', zh: '✅ 已复制！' },
+	'usage.worktreeCleanup.starterPrompt': { en: 'This git worktree (branch "{0}") could not be deleted automatically. Inspect its current state: run git status and git diff against its upstream or base branch, summarize what changed and why, and tell me whether the work is already merged or pushed elsewhere, so I can decide whether it is safe to delete this worktree.', zh: '此 git 工作树（分支“{0}”）无法自动删除。请检查其当前状态：运行 git status，并对比其上游或基础分支运行 git diff，总结改动内容及原因，并告诉我这些工作是否已合并或已推送到别处，以便我判断是否可以安全删除此工作树。' },
 	'usage.worktreeCleanup.unknownError': { en: 'unknown error', zh: '未知错误' },
 	'usage.worktreeCleanup.revealMissing': { en: '"{0}" no longer exists on disk.', zh: '“{0}”在磁盘上已不存在。' },
+	'usage.worktreeCleanup.open': { en: "📂 Open", zh: "📂 打开" },
+	'usage.worktreeCleanup.openTitle': { en: "Show this folder in the OS file explorer", zh: "在系统文件管理器中显示此文件夹" },
+	'usage.worktreeCleanup.deleteBtn': { en: "🗑️ Delete", zh: "🗑️ 删除" },
+	'usage.worktreeCleanup.deleteBtnTitle': { en: "Remove via git worktree remove (asks for confirmation)", zh: "通过 git worktree remove 移除（需要确认）" },
+	'usage.worktreeCleanup.deletingBtn': { en: "⏳ Deleting…", zh: "⏳ 正在删除…" },
+	'usage.worktreeCleanup.queuedBtn': { en: "⏱ Queued", zh: "⏱ 已排队" },
+	'usage.worktreeCleanup.queuedBtnTitle': { en: "Part of the running cleanup", zh: "属于正在运行的清理" },
+	'usage.worktreeCleanup.badgeCleaning': { en: "⏳ Cleaning…", zh: "⏳ 正在清理…" },
+	'usage.worktreeCleanup.badgeQueued': { en: "⏱ Queued ({0})", zh: "⏱ 已排队（{0}）" },
+	'usage.worktreeCleanup.nowDeleting': { en: "⏳ Now deleting {0} in {1}{2}", zh: "⏳ 正在删除 {1} 中的 {0}{2}" },
+	'usage.worktreeCleanup.unknownRepo': { en: "unknown repository", zh: "未知仓库" },
+	'usage.worktreeCleanup.progress': { en: "{0} / {1} processed", zh: "已处理 {0} / {1}" },
+	'usage.worktreeCleanup.progressWaiting': { en: "{0} / {1} processed · {2} waiting in the queue", zh: "已处理 {0} / {1} · 队列中还有 {2} 个等待" },
 };
 
 test('worktree cleanup delete-feedback keys resolve to their English text', () => {
@@ -1990,6 +2147,100 @@ test('worktree cleanup delete-feedback keys resolve in zh-cn', () => {
 		for (const [key, { zh }] of Object.entries(WORKTREE_CLEANUP_KEYS)) {
 			assert.equal(t(key), zh, `zh-cn value for ${key}`);
 		}
+	} finally {
+		mock.setLanguage('en');
+	}
+});
+
+// Fluency Score "My AI Coding Toolbox" card (moved from Diagnostics) — guards raw keys
+// resurfacing in the panel and in the copied summary for every locale.
+const TOOLBOX_KEYS_EN: Record<string, string> = {
+	'share.summaryCopied': 'Summary copied to clipboard',
+	'share.toolbox.cardTitle': 'My AI Coding Toolbox',
+	'share.toolbox.period': 'Period:',
+	'share.toolbox.editorsDetectedOne': '1 editor detected',
+	'share.toolbox.editorsDetected': '{0} editors detected',
+	'share.toolbox.copy': '📋 Copy Summary Text',
+	'share.toolbox.phrase.today': 'today',
+	'share.toolbox.phrase.last30': 'in the last 30 days',
+	'share.linkedin': 'Share on LinkedIn',
+	'share.bluesky': 'Share on Bluesky',
+	'share.mastodon': 'Share on Mastodon',
+};
+
+test('l10n: toolbox card keys resolve in English', () => {
+	for (const [key, english] of Object.entries(TOOLBOX_KEYS_EN)) {
+		assert.equal(t(key), english, `English value for ${key}`);
+	}
+});
+
+test('l10n: toolbox card keys resolve in zh-cn and differ from English', () => {
+	mock.setLanguage('zh-cn');
+	try {
+		const expected: Record<string, string> = {
+			'share.summaryCopied': '摘要已复制到剪贴板',
+			'share.toolbox.cardTitle': '我的 AI 编码工具箱',
+			'share.toolbox.period': '时间段：',
+			'share.toolbox.phrase.today': '今天',
+			'share.linkedin': '在 LinkedIn 上分享',
+		};
+		for (const [key, chinese] of Object.entries(expected)) {
+			assert.equal(t(key), chinese, `zh-cn value for ${key}`);
+		}
+	} finally {
+		mock.setLanguage('en');
+	}
+});
+
+// Fluency Score Share section: the score block's strings used to be hard-coded English.
+const SHARE_SECTION_KEYS: Record<string, [string, string]> = {
+	'share.section.title': ['Share Your AI Engineering Fluency', '分享您的 AI 工程熟练度'],
+	'share.section.switchLabel': ['What to share', '要分享的内容'],
+	'share.kind.score': ['Fluency Score', '熟练度评分'],
+	'share.kind.toolbox': ['AI Coding Toolbox', 'AI 编码工具箱'],
+	'share.score.description': ['Share your progress with the community and inspire others to level up their AI engineering skills!', '与社区分享您的进展，激励他人提升 AI 工程技能！'],
+	'share.score.overallLabel': ['Overall AI Engineering Fluency', '总体 AI 工程熟练度'],
+	'share.score.tagline': ['Track your AI usage with AI Engineering Fluency', '使用 AI Engineering Fluency 跟踪您的 AI 使用情况'],
+	'share.score.summary': ['My AI Engineering Fluency Score — {0}. {1}. Based on the last 30 days. #AIEngineeringFluency', '我的 AI 工程熟练度评分 — {0}。{1}。基于最近 30 天的数据。#AIEngineeringFluency'],
+	'share.export.button': ['Export', '导出'],
+	'share.export.png': ['Export as PNG Image', '导出为 PNG 图片'],
+	'share.export.pdf': ['Export as PDF Report', '导出为 PDF 报告'],
+	'share.export.pptx': ['Export as PowerPoint', '导出为 PowerPoint'],
+	'share.toolbox.saveImageTitle': ['Save AI Coding Toolbox Card', '保存 AI 编码工具箱卡片'],
+};
+
+test('l10n: Share section keys resolve in English', () => {
+	for (const [key, [english]] of Object.entries(SHARE_SECTION_KEYS)) {
+		assert.equal(t(key), english, `English value for ${key}`);
+	}
+});
+
+test('l10n: Share section keys resolve in zh-cn', () => {
+	mock.setLanguage('zh-cn');
+	try {
+		for (const [key, [, chinese]] of Object.entries(SHARE_SECTION_KEYS)) {
+			assert.equal(t(key), chinese, `zh-cn value for ${key}`);
+		}
+	} finally {
+		mock.setLanguage('en');
+	}
+});
+
+test('l10n: Diagnostics Session Cache strings resolve in English and zh-cn and stay distinct from Prompt Cache', () => {
+	mock.setLanguage('en');
+	try {
+		assert.equal(t('diagnostics.cache.tab'), 'Session Cache');
+		assert.equal(t('diagnostics.cache.infoTitle'), 'Session Cache Information');
+		assert.equal(t('diagnostics.cache.management'), 'Session Cache Management');
+		assert.ok(t('diagnostics.cache.storedIncludes').includes('on-disk snapshot'));
+		assert.ok(t('diagnostics.cache.infoBody').includes('not LLM prompt caching'), 'English body must disambiguate from prompt caching');
+		assert.ok(t('diagnostics.cache.infoBody').includes('on-disk snapshot'), 'English body must describe the on-disk snapshot, not globalState');
+
+		mock.setLanguage('zh-cn');
+		assert.equal(t('diagnostics.cache.tab'), '会话缓存');
+		assert.equal(t('diagnostics.cache.infoTitle'), '会话缓存信息');
+		assert.equal(t('diagnostics.cache.management'), '会话缓存管理');
+		assert.ok(t('diagnostics.cache.infoBody').includes('LLM'), 'zh-cn body must still mention LLM prompt caching');
 	} finally {
 		mock.setLanguage('en');
 	}
@@ -2011,6 +2262,340 @@ test('l10n: workspace grouping strings in the Customization Files matrix resolve
 			t('customizationMatrix.ungroupedNames', '2', 'a, b'),
 			'2 个工作区名称看起来像未分组的工作树或克隆：a, b'
 		);
+	} finally {
+		mock.setLanguage('en');
+	}
+});
+
+test('l10n: efficiency Skills tab label resolves in English and zh-cn', () => {
+	assert.equal(t('efficiency.tab.skills'), '🛠️ Skills');
+	mock.setLanguage('zh-cn');
+	try {
+		assert.equal(t('efficiency.tab.skills'), '🛠️ 技能');
+	} finally {
+		mock.setLanguage('en');
+	}
+});
+
+// Usage view — the GitHub activity freshness banner shared by the Repository PRs and Cloud Agent
+// tabs. These are rendered webview-side through localize()/localizeFormat(), so a missing or
+// mistranslated key silently shows English to zh-CN users instead of failing anywhere.
+test('l10n: GitHub activity freshness banner labels resolve in English', () => {
+	const expected: Record<string, string> = {
+		'usage.githubActivity.refreshNow': '🔄 Refresh now',
+		'usage.githubActivity.refreshNowTooltip': 'Revalidate the cached GitHub data now instead of waiting for the next hourly refresh',
+		'usage.githubActivity.notFetchedTitle': 'Not fetched yet.',
+		'usage.githubActivity.notFetchedBody': 'The snapshot is refreshed hourly by whichever VS Code window takes it on — it will appear here once that first refresh completes.',
+		'usage.githubActivity.revalidatingTitle': 'Revalidating.',
+		'usage.githubActivity.revalidatingBody': 'Showing the cached snapshot from {0} while it is refreshed.',
+		'usage.githubActivity.updated': '🕒 Updated {0} · next refresh after {1}.',
+		'usage.githubActivity.unknownNextRefresh': 'unknown',
+		'usage.githubActivity.cachePolicy': 'Automatically revalidated at most once an hour, by a single VS Code window, to keep GitHub API usage low — Refresh now asks for one straight away.',
+		'usage.githubActivity.partialTitle': 'Partial data — the figures below are a lower bound.',
+		'usage.githubActivity.retryHint': 'Use Refresh now above to retry — details are in the extension Output channel.',
+		'usage.githubActivity.partialRepoPrs': 'At least one repository listing did not complete (an error, a timeout, or the page cap), so some pull requests in the window are not counted.',
+		'usage.githubActivity.partialAgentTasks': 'Some tasks were not detailed this pass — the task-detail budget was exhausted, or a task listing did not complete.',
+		'usage.githubActivity.tasksScannedTooltip': 'Showing {0} of {1} tasks — the rest could not be counted this pass, so these figures are a lower bound',
+		'usage.githubActivity.tasksScannedLabel': '({0}/{1} tasks scanned)',
+		'usage.githubActivity.lowerBoundNote': 'Note: some figures could not be counted this pass — a listing did not complete, a detail call failed, or the detail budget ran out — so these totals are lower bounds.',
+		'usage.githubActivity.accountTasksIncomplete': 'The account-wide task listing stopped early ({0}) — tasks outside your workspace repositories may be missing.',
+		'usage.githubActivity.accountTasksUnavailable': 'Account-wide tasks unavailable ({0}) — only workspace repositories are shown.',
+		'usage.githubActivity.accountTasksUnknownReason': 'the /agents/tasks endpoint could not be read',
+	};
+	for (const [key, english] of Object.entries(expected)) {
+		assert.equal(t(key), english, `English value for ${key}`);
+	}
+});
+
+test('l10n: GitHub activity freshness banner labels resolve in zh-cn', () => {
+	mock.setLanguage('zh-cn');
+	try {
+		const expected: Record<string, string> = {
+			'usage.githubActivity.refreshNow': '🔄 立即刷新',
+			'usage.githubActivity.refreshNowTooltip': '立即重新校验已缓存的 GitHub 数据，无需等待下一次每小时刷新',
+			'usage.githubActivity.notFetchedTitle': '尚未获取。',
+			'usage.githubActivity.notFetchedBody': '快照由取得刷新权的任一 VS Code 窗口每小时刷新一次 — 首次刷新完成后会显示在这里。',
+			'usage.githubActivity.revalidatingTitle': '正在重新校验。',
+			'usage.githubActivity.revalidatingBody': '刷新期间显示 {0} 的缓存快照。',
+			'usage.githubActivity.updated': '🕒 更新于 {0} · 下次刷新在 {1} 之后。',
+			'usage.githubActivity.unknownNextRefresh': '未知',
+			'usage.githubActivity.cachePolicy': '由单个 VS Code 窗口最多每小时自动重新校验一次，以降低 GitHub API 用量 —「立即刷新」会马上请求一次。',
+			'usage.githubActivity.partialTitle': '数据不完整 — 下方数字为下限值。',
+			'usage.githubActivity.retryHint': '使用上方的「立即刷新」重试 — 详细信息见扩展的输出通道。',
+			'usage.githubActivity.partialRepoPrs': '至少有一个仓库的列表未能完整枚举（出错、超时或达到分页上限），因此时间窗口内的部分拉取请求未被计入。',
+			'usage.githubActivity.partialAgentTasks': '本次未获取全部任务的明细 — 任务明细预算已用尽，或任务列表未能完整枚举。',
+			'usage.githubActivity.tasksScannedTooltip': '显示 {1} 个任务中的 {0} 个 — 其余任务本次无法统计，因此以下数字为下限',
+			'usage.githubActivity.tasksScannedLabel': '(已扫描 {0}/{1} 个任务)',
+			'usage.githubActivity.lowerBoundNote': '注意：本次有部分数据无法统计 — 列表未能完整枚举、明细调用失败，或明细预算已用尽 — 因此以下合计为下限值。',
+			'usage.githubActivity.accountTasksIncomplete': '账户级任务列表提前中断（{0}）— 工作区仓库之外的任务可能缺失。',
+			'usage.githubActivity.accountTasksUnavailable': '无法获取账户级任务（{0}）— 仅显示工作区仓库。',
+			'usage.githubActivity.accountTasksUnknownReason': '无法读取 /agents/tasks 接口',
+		};
+		for (const [key, chinese] of Object.entries(expected)) {
+			assert.equal(t(key), chinese, `zh-cn value for ${key}`);
+		}
+	} finally {
+		mock.setLanguage('en');
+	}
+});
+
+test('l10n: the banner\'s placeholder templates keep their {0}/{1} slots in both languages', () => {
+	// localizeFormat() fills these webview-side; a translation that drops a slot would silently
+	// swallow the snapshot age or the next-refresh time.
+	for (const key of ['usage.githubActivity.revalidatingBody', 'usage.githubActivity.updated', 'usage.githubActivity.tasksScannedTooltip', 'usage.githubActivity.tasksScannedLabel', 'usage.githubActivity.accountTasksIncomplete', 'usage.githubActivity.accountTasksUnavailable']) {
+		assert.match(t(key), /\{0\}/, `English ${key} keeps its {0} slot`);
+	}
+	for (const key of ['usage.githubActivity.updated', 'usage.githubActivity.tasksScannedTooltip', 'usage.githubActivity.tasksScannedLabel']) {
+		assert.match(t(key), /\{1\}/, `English ${key} keeps its {1} slot`);
+	}
+	mock.setLanguage('zh-cn');
+	try {
+		for (const key of ['usage.githubActivity.revalidatingBody', 'usage.githubActivity.updated', 'usage.githubActivity.tasksScannedTooltip', 'usage.githubActivity.tasksScannedLabel', 'usage.githubActivity.accountTasksIncomplete', 'usage.githubActivity.accountTasksUnavailable']) {
+			assert.match(t(key), /\{0\}/, `zh-cn ${key} keeps its {0} slot`);
+		}
+		for (const key of ['usage.githubActivity.updated', 'usage.githubActivity.tasksScannedTooltip', 'usage.githubActivity.tasksScannedLabel']) {
+			assert.match(t(key), /\{1\}/, `zh-cn ${key} keeps its {1} slot`);
+		}
+	} finally {
+		mock.setLanguage('en');
+	}
+});
+
+test('l10n: cost-basis switch and Router card strings resolve in English and zh-cn', () => {
+	mock.setLanguage('en');
+	const english: Record<string, string> = {
+		'efficiency.models.controls.costBasis': 'Cost basis',
+		'efficiency.models.costBasis.provider': 'Provider rates',
+		'efficiency.models.costBasis.exact': 'Exact Copilot billing',
+		'usage.router.title': 'Copilot Fusion Router',
+		'usage.router.stat.compoundRate': 'Compound rate',
+		'usage.router.stat.judgeRejection': 'Judge rejection rate',
+		'usage.router.stat.aiuPerTurn': 'AIU per turn',
+		'usage.router.period.last30Days': 'Last 30 days',
+	};
+	for (const [key, value] of Object.entries(english)) {
+		assert.equal(t(key), value, `English value for ${key}`);
+	}
+	assert.match(t('efficiency.models.costBasis.exactNote'), /exact Copilot billing/);
+	assert.equal(t('efficiency.models.sideStats', '1', '2', '3K', '$4.00'), '1 sessions · 2 edit turns · 3K tokens · $4.00');
+	assert.match(t('efficiency.models.costBasis.providerNote'), /provider\/API rates/);
+
+	mock.setLanguage('zh-cn');
+	try {
+		const chinese: Record<string, string> = {
+			'efficiency.models.controls.costBasis': '\u6210\u672c\u57fa\u51c6',
+			'efficiency.models.costBasis.provider': '\u63d0\u4f9b\u5546\u8d39\u7387',
+			'usage.router.title': 'Copilot Fusion \u8def\u7531\u5668',
+			'usage.router.stat.compoundRate': '\u590d\u5408\u7387',
+		};
+		for (const [key, value] of Object.entries(chinese)) {
+			assert.equal(t(key), value, `zh-cn value for ${key}`);
+		}
+	} finally {
+		mock.setLanguage('en');
+	}
+});
+
+test('l10n: Usage Analysis month labels name the period their data covers', () => {
+	mock.setLanguage('en');
+	assert.equal(t('usage.toolPeriod.colPreviousMonth'), 'Previous Month');
+	assert.equal(t('usage.router.period.month'), 'This month');
+	assert.equal(t('usage.router.period.lastMonth'), 'Last month');
+	mock.setLanguage('zh-cn');
+	try {
+		assert.equal(t('usage.toolPeriod.colPreviousMonth'), '上月');
+		assert.equal(t('usage.router.period.month'), '本月');
+		assert.equal(t('usage.router.period.lastMonth'), '上个月');
+	} finally {
+		mock.setLanguage('en');
+	}
+});
+
+test('l10n: the skill suggestions path in the insight names the real tab and section', () => {
+	const sectionTitle = (): string => t('usage.skillSuggestions.title', '').replace(/\s*[(（].*$/, '');
+	const assertPath = (): void => {
+		const expected = `${t('usage.tab.insights')} → ${sectionTitle()}`;
+		assert.ok(t('insight.repeatedTaskSkillCandidate.seeDetails').includes(expected), `seeDetails names ${expected}`);
+		assert.ok(t('insight.repeatedTaskSkillCandidate.more.one', 1).includes(expected), `more.one names ${expected}`);
+		assert.ok(t('insight.repeatedTaskSkillCandidate.more.other', 2).includes(expected), `more.other names ${expected}`);
+	};
+	mock.setLanguage('en');
+	assert.equal(sectionTitle(), 'Skill Suggestions');
+	assertPath();
+	mock.setLanguage('zh-cn');
+	try {
+		assertPath();
+	} finally {
+		mock.setLanguage('en');
+	}
+});
+
+test('l10n: Badge setup strings resolve in English and zh-cn', () => {
+	mock.setLanguage('en');
+	const english: Record<string, string> = {
+		'command.showBadgeSetup.title': 'Show Badge Setup',
+		'badge.button.label': 'Universe Badge',
+		'badge.title': 'Badge Setup',
+		'badge.status.never': 'Not synced yet.',
+		'badge.action.syncUsb': 'Sync over USB',
+		'badge.action.install': 'Install app on badge',
+		'badge.sync.cancelled': 'Sync cancelled.',
+		'badge.install.title': 'Step 1: install the app',
+		'badge.status.title': 'Step 2: sync your data',
+		'badge.action.skipInstall': 'Already installed',
+		'badge.sync.needsInstall': 'Install the app first. Sync unlocks once the app is on the badge.',
+		'badge.theme.title': 'Badge colours',
+		'badge.theme.source.label': 'Palette',
+		'badge.theme.source.universe': 'GitHub Universe',
+		'badge.theme.source.editor': 'My VS Code theme',
+		'badge.link.badgewareDocs': 'Badgeware docs',
+		'command.hideBadgeSetup.title': 'Hide Badge Button',
+		'command.restoreBadgeSetup.title': 'Show Badge Button',
+		'badge.action.hide': 'Hide this view (I have no badge)',
+		'badge.image.alt': 'The GitHub Universe 2026 badge',
+	};
+	for (const [key, value] of Object.entries(english)) {
+		assert.equal(t(key), value, `English value for ${key}`);
+	}
+	assert.equal(t('badge.status.last', 'Oct 23, 2026', '1,024', 'COM5'), 'Last synced Oct 23, 2026 · 1,024 bytes · COM5');
+	assert.equal(t('badge.sync.ok', '1,024', 'COM5'), 'Synced 1,024 bytes over COM5. The badge app restarts while it loads the new data.');
+	assert.equal(t('badge.sync.failed', 'boom'), 'Sync failed: boom');
+	assert.equal(t('badge.install.copied', 'E:\\apps\\fluency'), 'Copied the app to E:\\apps\\fluency. Eject the drive, then open Fluency from the badge menu.');
+	assert.equal(t('badge.install.failed', 'denied'), 'Install failed: denied');
+	assert.match(t('badge.install.noDrive'), /No BADGER drive found/);
+	assert.match(t('badge.sync.mpremoteMissing'), /pip install mpremote/);
+	assert.match(t('badge.hide.notice'), /Show Badge Button/);
+
+	mock.setLanguage('zh-cn');
+	try {
+		assert.equal(t('badge.title'), '徽章设置');
+		assert.equal(t('badge.action.syncUsb'), '通过 USB 同步');
+		assert.equal(t('command.restoreBadgeSetup.title'), '显示徽章按钮');
+		assert.equal(t('badge.action.hide'), '隐藏此视图（我没有徽章）');
+		assert.equal(t('badge.theme.source.label'), '配色');
+		assert.equal(t('badge.theme.source.editor'), '我的 VS Code 主题');
+		assert.equal(t('badge.status.last', 'Oct 23, 2026', '1,024', 'COM5'), '上次同步 Oct 23, 2026 · 1,024 字节 · COM5');
+		assert.equal(t('badge.sync.ok', '1,024', 'COM5'), '已通过 COM5 同步 1,024 字节。徽章应用在加载新数据时会重新启动。');
+		assert.match(t('badge.sync.mpremoteMissing'), /pip install mpremote/);
+	} finally {
+		mock.setLanguage('en');
+	}
+});
+
+test('l10n: strings for the tabs moved out of Diagnostics Research resolve in both languages', () => {
+	assert.equal(t('usage.toolExec.families.title'), 'Output tokens by tool family');
+	assert.equal(t('usage.toolExec.families.configure'), 'Configure tool families ↗');
+	assert.equal(t('usage.toolExec.families.other'), 'Other Tools');
+	assert.equal(t('usage.toolExec.families.builtIn'), 'built-in');
+	assert.equal(t('usage.toolExec.families.alternative'), 'alt');
+	assert.equal(t('usage.toolExec.families.baseline'), 'baseline');
+	assert.equal(t('usage.toolExec.families.col.total'), 'Total output tokens');
+	assert.equal(t('usage.toolExec.families.col.vsBuiltIn'), 'vs Built-in');
+	assert.equal(t('usage.toolExec.empty.families'), 'No tools with output-token data and a recorded outcome in this period.');
+	assert.match(t('usage.toolExec.families.subtitle'), /per completed call/);
+	assert.equal(t('efficiency.tab.ttft'), '⏱️ TTFT');
+	assert.equal(t('efficiency.ttft.bucketBy'), 'Bucket by:');
+	assert.equal(t('efficiency.ttft.range.180d'), 'Last 6 months');
+	assert.equal(t('efficiency.ttft.empty.title'), '📭 No TTFT data found');
+	assert.match(t('efficiency.ttft.empty.body', '3'), /^Checked 3 session file/);
+	assert.equal(t('efficiency.ttft.legend.toggle', 'GPT'), 'Click to hide/show GPT');
+	assert.equal(t('efficiency.skills.table.heading'), 'Invocations per skill');
+	assert.equal(t('efficiency.skills.col.skill'), 'Skill');
+	assert.equal(t('efficiency.skills.col.description'), 'Description');
+	assert.equal(t('efficiency.skills.col.invocations'), 'Invocations');
+	assert.equal(t('diagnostics.pricingCheck.tab'), 'Pricing Check');
+	assert.equal(t('diagnostics.pricingCheck.title'), '🧮 Pricing Check');
+	assert.match(t('diagnostics.pricingCheck.body'), /Local Model Leaderboard/);
+	assert.equal(t('whatsNew.feature.diagnostics.ttft-tab.title'), 'Efficiency → TTFT');
+	mock.setLanguage('zh-cn');
+	try {
+		assert.equal(t('usage.toolExec.families.title'), '按工具系列统计输出令牌');
+		assert.equal(t('usage.toolExec.families.configure'), '配置工具系列 ↗');
+		assert.equal(t('usage.toolExec.families.other'), '其他工具');
+		assert.equal(t('usage.toolExec.families.col.vsBuiltIn'), '与内置比较');
+		assert.equal(t('usage.toolExec.empty.families'), '此期间没有同时具备输出令牌数据和已记录结果的工具。');
+		assert.equal(t('efficiency.tab.ttft'), '⏱️ 首字延迟');
+		assert.equal(t('efficiency.ttft.bucketBy'), '分组方式：');
+		assert.equal(t('efficiency.ttft.range.180d'), '最近 6 个月');
+		assert.equal(t('efficiency.ttft.empty.title'), '📭 未找到首字延迟数据');
+		assert.match(t('efficiency.ttft.empty.body', '3'), /已检查所选范围内的 3 个会话文件/);
+		assert.equal(t('efficiency.ttft.legend.toggle', 'GPT'), '单击以隐藏或显示 GPT');
+		assert.equal(t('efficiency.skills.table.heading'), '各技能调用次数');
+		assert.equal(t('efficiency.skills.col.description'), '说明');
+		assert.equal(t('diagnostics.pricingCheck.tab'), '定价检查');
+		assert.equal(t('diagnostics.pricingCheck.title'), '🧮 定价检查');
+		assert.equal(t('whatsNew.feature.diagnostics.ttft-tab.title'), '效率 → 首字延迟');
+	} finally {
+		mock.setLanguage('en');
+	}
+});
+
+test('l10n: Session Cache rename resolves in English and zh-cn', () => {
+	mock.setLanguage('en');
+	assert.equal(t('command.clearCache.title'), 'Clear Session Cache');
+	assert.equal(t('diagnostics.cache.clearButton'), 'Clear Session Cache');
+	assert.equal(t('diagnostics.cache.clearedButton'), 'Session Cache Cleared');
+	mock.setLanguage('zh-cn');
+	try {
+		assert.equal(t('command.clearCache.title'), '清除会话缓存');
+		assert.equal(t('diagnostics.cache.clearButton'), '清除会话缓存');
+		assert.equal(t('diagnostics.cache.clearedButton'), '会话缓存已清除');
+	} finally {
+		mock.setLanguage('en');
+	}
+});
+
+test('l10n: GitHub sign-in, About and Team Server text resolves in English and zh-cn', () => {
+	mock.setLanguage('en');
+	const signInPath = 'Sign in with GitHub (Diagnostics › Settings › GitHub Auth)';
+	assert.equal(t('usage.repos.signInHint'), `${signInPath} to see AI PR activity across your repositories.`);
+	assert.equal(t('usage.agent.signInHint'), `${signInPath} to see Copilot cloud agent session data.`);
+	assert.match(t('usage.about.body'), /GitHub Copilot and Claude Code/);
+	assert.equal(t('diagnostics.teamServer.getStartedTitle'), 'Get Started with Team Server');
+	assert.equal(t('diagnostics.teamServer.getStartedBody'), 'Deploy the sharing server and configure its URL in the Team Server panel.');
+	assert.equal(t('diagnostics.teamServer.getStartedDeployStep'), 'Deploy the sharing server (see the sharing-server/ folder in the repository)');
+	assert.equal(t('diagnostics.teamServer.getStartedSyncStep'), 'Data syncs automatically every 5 minutes once configured');
+	assert.equal(t('diagnostics.teamServer.getStartedUrlStep'), "Enter the server's base URL in the Team Server panel");
+	assert.equal(t('diagnostics.teamServer.configureButton'), 'Configure Team Server');
+	assert.equal(t('diagnostics.teamServer.manageButton'), 'Manage Team Server');
+	assert.equal(t('diagnostics.githubAuth.intro'), 'Sign in with GitHub to connect the features below to your account.');
+	assert.equal(t('diagnostics.githubAuth.signedInLead'), 'You are signed in with GitHub, which enables:');
+	assert.match(t('diagnostics.githubAuth.signedOutLead'), /built-in authentication/);
+	assert.match(t('diagnostics.githubAuth.featureRepoPrs'), /Repository PRs/);
+	assert.match(t('diagnostics.githubAuth.featureCloudAgent'), /Cloud Agent/);
+	assert.match(t('diagnostics.githubAuth.featureBilling'), /Billing/);
+	assert.equal(t('diagnostics.githubAuth.featureTeamServer'), 'Syncing your usage to a team server');
+
+	mock.setLanguage('zh-cn');
+	try {
+		assert.equal(t('usage.repos.signInHint'), '通过 GitHub 登录（Diagnostics › Settings › GitHub Auth）以查看各仓库中的 AI PR 活动。');
+		assert.equal(t('usage.agent.signInHint'), '通过 GitHub 登录（Diagnostics › Settings › GitHub Auth）以查看 Copilot 云代理会话数据。');
+		assert.match(t('usage.about.body'), /本地会话日志/);
+		assert.equal(t('diagnostics.teamServer.getStartedTitle'), '开始使用团队服务器');
+		assert.equal(t('diagnostics.teamServer.getStartedBody'), '部署共享服务器，并在团队服务器面板中配置其 URL。');
+		assert.equal(t('diagnostics.teamServer.getStartedDeployStep'), '部署共享服务器（请参阅仓库中的 sharing-server/ 文件夹）');
+		assert.equal(t('diagnostics.teamServer.getStartedSyncStep'), '配置后，数据每 5 分钟自动同步一次');
+		assert.equal(t('diagnostics.teamServer.configureButton'), '配置团队服务器');
+		assert.equal(t('diagnostics.teamServer.manageButton'), '管理团队服务器');
+		assert.equal(t('diagnostics.githubAuth.intro'), '使用 GitHub 登录，将以下功能连接到你的账户。');
+		assert.equal(t('diagnostics.githubAuth.featureTeamServer'), '将你的使用情况同步到团队服务器');
+	} finally {
+		mock.setLanguage('en');
+	}
+});
+
+test('l10n: aligned command titles resolve in English and zh-cn', () => {
+	mock.setLanguage('en');
+	assert.equal(t('command.generateDiagnosticReport.title'), 'Show Diagnostics');
+	assert.equal(t('command.showFluencyLevelViewer.title'), 'Show Scoring Guide');
+	assert.equal(t('command.showEfficiency.title'), 'Show Efficiency');
+	assert.equal(t('command.resetInsightsState.title'), 'Reset Insights Dismissals');
+	mock.setLanguage('zh-cn');
+	try {
+		assert.equal(t('command.generateDiagnosticReport.title'), '显示诊断');
+		assert.equal(t('command.showFluencyLevelViewer.title'), '显示评分指南');
+		assert.equal(t('command.showEfficiency.title'), '显示效率');
+		assert.equal(t('command.resetInsightsState.title'), '重置已忽略的洞察');
 	} finally {
 		mock.setLanguage('en');
 	}

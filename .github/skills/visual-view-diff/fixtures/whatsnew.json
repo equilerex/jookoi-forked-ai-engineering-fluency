@@ -11,7 +11,7 @@
         {
           "id": "usage.memory-files-hygiene",
           "title": "Copilot Memory Files",
-          "description": "A new section on the Tools tab showing how much Copilot agent memory has accumulated on disk — per workspace, repo, session, and global scope — with counts for stale and oversized files so you know what is safe to clear out.",
+          "description": "A new section on the Workspace Health tab showing how much Copilot agent memory has accumulated on disk — per workspace, repo, session, and global scope — with counts for stale and oversized files so you know what is safe to clear out.",
           "kind": "section",
           "isUnseen": true
         },
@@ -38,7 +38,7 @@
         },
         {
           "id": "diagnostics.ttft-tab",
-          "title": "Research → TTFT",
+          "title": "Efficiency → TTFT",
           "description": "How long each model takes to start answering you, averaged by day, week, and month with a trendline. Read straight from Copilot Chat's own debug log, so there is nothing to switch on.",
           "kind": "tab",
           "isUnseen": false

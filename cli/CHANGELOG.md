@@ -4,6 +4,14 @@ All notable changes to the CLI (@rajbos/ai-engineering-fluency) will be document
 
 ## [Unreleased]
 
+### Bug Fixes
+- Diagnostic log lines from the shared session parsing code now go to stderr. A skipped oversized session file used to write `[processSessionFile] Skipping oversized file ...` to stdout ahead of the JSON, so `JSON.parse` of `--json` output failed, and with it the Visual Studio and JetBrains views that read `all --json` and `fluency --json`
+
+## [0.7.1] - 2026-10-27
+
+### Features
+- `usage-analysis --json` (and the `usage` key of `all --json`, which Visual Studio and JetBrains render) is now built by the same shared payload builder as the VS Code extension's Usage Analysis view, so it carries the fields the view reads: `customizationMatrix`, `missedPotential`, `curationAnalysis`, evaluated `insights`, `correctionReport`, `memoryFilesAnalysis` and the display settings. The customization matrix rows are now sorted busiest workspace first, like the extension's. `all --json` computes the customization matrix and curation once for its `usage`, `fluency` and `curation` payloads (#2418)
+
 ## [0.7.0] - 2026-10-10
 
 ### Features

@@ -56,11 +56,7 @@ function buildInitialData(overrides: Record<string, unknown> = {}): Record<strin
 		sessionFolders: [],
 		displaySettings: { showTokens: true, showCost: true, monthlyBudget: null },
 		quotaEntitlements: null,
-		toolCallStats: null,
-		skillCallStats: null,
 		skillCallsByEditor: null,
-		skillDescriptions: {},
-		toolFamilies: [],
 		otelComparison: null,
 		...overrides,
 	};
@@ -176,17 +172,6 @@ function bootWebviewUnsettled(initialData: Record<string, unknown> | null, saved
 	};
 }
 
-/**
- * Reads one Share Card stat tile ("Sessions", "Interactions", …) by its label. The value and the
- * label live in sibling divs with no whitespace between them, so `harness.text()` would run them
- * together ("1Sessions"); going through the DOM keeps the assertion readable.
- */
-function shareStat(harness: Harness, label: string): string | undefined {
-	const tiles = Array.from(harness.window.document.querySelectorAll('#tab-share .share-stat')) as any[];
-	const tile = tiles.find((t) => t.querySelector('.share-stat-label')?.textContent === label);
-	return tile?.querySelector('.share-stat-value')?.textContent;
-}
-
 let syncBundle: string | undefined;
 function getSyncBundle(): string {
 	if (syncBundle === undefined) { throw new Error('Bundle not preloaded — call preloadBundle() first'); }
@@ -195,6 +180,71 @@ function getSyncBundle(): string {
 async function preloadBundle(): Promise<void> {
 	syncBundle ??= await bundleDiagnosticsWebview();
 }
+
+test('API Quota lists account budgets through the shared renderer and follows live updates', async () => {
+	await preloadBundle();
+	const harness = bootWebviewUnsettled(buildInitialData({
+		accountBudgets: [
+			{ accountId: '1', label: 'octo-personal', status: 'ok', balance: { budgetUsd: 39, budgetAiCredits: 3900, remainingAiCredits: 1500, usedAiCredits: 2400, pctAvailable: 38.5 } },
+			{ accountId: '2', label: 'octo-work', status: 'unavailable', reason: 'no-session' },
+		],
+	}));
+	await harness.settle();
+
+	const list = (): any => harness.window.document.getElementById('diag-account-budgets');
+	assert.ok(list().textContent.includes('GitHub accounts in VS Code'));
+	assert.ok(list().textContent.includes('$24.00 / $39.00 used'));
+	assert.ok(list().textContent.includes('Sign in with this account from the Accounts menu'));
+	assert.ok(list().innerHTML.includes('width:61.50%'), 'same usage bar as the Billing tab');
+
+	harness.post({ command: 'accountBudgetsUpdated', accountBudgets: [{ accountId: '3', label: 'octo-new', status: 'no-quota' }] });
+	await harness.settle();
+	assert.ok(list().textContent.includes('octo-new'));
+	assert.ok(!list().textContent.includes('octo-personal'));
+});
+
+test('diagnostics action buttons post exactly once, whether the click lands on the button or a child span', async () => {
+	await preloadBundle();
+	const buttons: Array<{ id: string; command: string }> = [
+		{ id: 'btn-clear-cache', command: 'clearCache' },
+		{ id: 'btn-clear-cache-tab', command: 'clearCache' },
+		{ id: 'btn-reset-insights-tab', command: 'resetInsightsState' },
+		{ id: 'btn-reset-debug-counters', command: 'resetDebugCounters' },
+		{ id: 'btn-reset-discovered-editors', command: 'resetDiscoveredEditors' },
+	];
+	for (const { id, command } of buttons) {
+		for (const clickOn of ['button', 'span']) {
+			const harness = bootWebviewUnsettled(buildInitialData({ isDebugMode: true }));
+			await harness.settle();
+			const button = harness.window.document.getElementById(id);
+			assert.ok(button, `${id} must render`);
+			const clickTarget = clickOn === 'span' ? button.querySelector('span') : button;
+			assert.ok(clickTarget, `${id} must have a ${clickOn}`);
+			clickTarget.click();
+			assert.equal(
+				harness.posted.filter((message) => message.command === command).length,
+				1,
+				`${id}: a click on the ${clickOn} must post ${command} exactly once`,
+			);
+		}
+	}
+});
+
+test('clear cache shows progress on the clicked button and recovers when the host confirms', async () => {
+	await preloadBundle();
+	const harness = bootWebviewUnsettled(buildInitialData());
+	await harness.settle();
+	const button = harness.window.document.getElementById('btn-clear-cache');
+	button.querySelector('span').click();
+	assert.equal(button.disabled, true);
+	assert.match(button.textContent, /Clearing/);
+	assert.ok(button.querySelector('span'), 'the progress state keeps its child spans');
+
+	harness.post({ command: 'cacheCleared' });
+	await harness.settle();
+	assert.equal(button.disabled, false);
+	assert.match(button.textContent, /Cache Cleared/);
+});
 
 test('Backend Storage tab renders normally when no early message arrives', async () => {
 	await preloadBundle();
@@ -253,52 +303,6 @@ test('a githubAuth value from an early backendStorageInfoLoaded message also sur
 	assert.ok(rendered?.includes('octocat'), `expected the authenticated GitHub user to render, got: ${rendered}`);
 });
 
-test('changing the Share Card period refreshes the card and keeps its controls interactive', async () => {
-	await preloadBundle();
-	const recent = new Date().toISOString();
-	const old = new Date(Date.now() - 60 * 24 * 60 * 60 * 1000).toISOString();
-	const session = (file: string, lastInteraction: string) => ({
-		file,
-		size: 100,
-		modified: lastInteraction,
-		interactions: 2,
-		tokens: 1_000,
-		contextReferences: {},
-		firstInteraction: lastInteraction,
-		lastInteraction,
-		editorSource: 'VS Code',
-	});
-	const harness = bootWebviewUnsettled(buildInitialData({
-		detailedSessionFiles: [session('recent.json', recent), session('old.json', old)],
-	}));
-	await harness.settle();
-
-	const initialCard = harness.text('#tab-share');
-	assert.ok(
-		initialCard?.includes('Last 14 days · 1 editor detected'),
-		`expected the default 14-day subtitle, got: ${initialCard}`,
-	);
-	assert.equal(shareStat(harness, 'Sessions'), '1', 'only the recent session falls inside the default period');
-
-	const selector = harness.window.document.getElementById('share-card-period-select') as HTMLSelectElement;
-	selector.value = 'allTime';
-	selector.dispatchEvent(new harness.window.Event('change', { bubbles: true }));
-
-	const refreshedCard = harness.text('#tab-share');
-	assert.ok(
-		refreshedCard?.includes('All time · 1 editor detected'),
-		`expected the card to re-render for the new period, got: ${refreshedCard}`,
-	);
-	assert.equal(shareStat(harness, 'Sessions'), '2', 'the 60-day-old session joins the count once the period is All time');
-	assert.equal(harness.window.document.querySelectorAll('#tab-share').length, 1);
-	const refreshedSelector = harness.window.document.getElementById('share-card-period-select') as HTMLSelectElement;
-	assert.equal(refreshedSelector.value, 'allTime');
-
-	(harness.window.document.getElementById('btn-copy-share-summary') as HTMLButtonElement).click();
-	assert.equal(harness.posted.at(-1)?.command, 'copyText');
-	assert.match(harness.posted.at(-1)?.text, /2 sessions.*of all time/);
-});
-
 test('a backendStorageInfoLoaded message delivered before the layout renders is not discarded by the first paint', async () => {
 	// The host sends this message as early as possible (sendBackendStorageInfoEarly), racing the
 	// webview's own bootstrap() which awaits a dynamic import before building any DOM. Dispatching
@@ -320,33 +324,6 @@ test('a backendStorageInfoLoaded message delivered before the layout renders is 
 	assert.ok(
 		!rendered?.includes('Loading backend storage status'),
 		'the first paint must not silently fall back to the placeholder once real data already arrived',
-	);
-});
-
-test('Share Card setup is a no-op on the loading first paint, and does not abort the rest of the wiring', async () => {
-	// renderShareCardTab() emits the period selector and share buttons only once session files
-	// have loaded. On the loading first paint — which every panel open goes through — none of
-	// the elements setupShareSummaryButtonHandler() wires exist yet. It must still return
-	// cleanly: setupButtonHandlers() calls it mid-sequence, so anything thrown here would
-	// silently leave every button wired after it — starting with btn-issue — dead for the
-	// rest of the session. reRenderShareCard() wires them for real once the data arrives.
-	await preloadBundle();
-	const harness = bootWebviewUnsettled(buildInitialData({ detailedSessionFiles: [] }));
-	await harness.settle();
-
-	const card = harness.text('#tab-share');
-	assert.ok(card?.includes('Loading session files'), `expected the loading placeholder, got: ${card}`);
-	assert.equal(
-		harness.window.document.getElementById('share-card-period-select'),
-		null,
-		'the period selector must not exist while session files are still loading',
-	);
-
-	(harness.window.document.getElementById('btn-issue') as HTMLButtonElement).click();
-	assert.equal(
-		harness.posted.at(-1)?.command,
-		'openIssue',
-		'a button wired after setupShareSummaryButtonHandler must still be interactive',
 	);
 });
 
@@ -374,19 +351,19 @@ test('OTel Delta tab shows a detecting message while comparison data is still lo
 	assert.ok(rendered?.includes('Detecting Copilot CLI OpenTelemetry export data'), `expected detecting body, got: ${rendered}`);
 });
 
-test('restoring the OTel Delta tab reveals the Research leaf bar and marks it active', async () => {
+test('restoring the OTel Delta tab reveals the Diagnostics leaf bar and marks it active', async () => {
 	await preloadBundle();
 	const harness = bootWebviewUnsettled(buildInitialData(), { activeTab: 'otel-delta' });
 	await harness.settle();
 
 	const doc = harness.window.document;
-	const researchGroupTab = doc.querySelector('.group-tab[data-group="research"]');
-	const researchLeafBar = doc.querySelector('.leaf-tabs[data-group="research"]');
+	const groupTab = doc.querySelector('.group-tab[data-group="diagnostics"]');
+	const leafBar = doc.querySelector('.leaf-tabs[data-group="diagnostics"]');
 	const otelTabButton = doc.querySelector('.tab[data-tab="otel-delta"]');
 	const otelTabContent = doc.getElementById('tab-otel-delta');
 
-	assert.ok(researchGroupTab?.classList.contains('active'), 'expected the Research group tab to be active');
-	assert.notEqual(researchLeafBar?.style.display, 'none', 'expected the Research leaf tab bar to be visible');
+	assert.ok(groupTab?.classList.contains('active'), 'expected the Diagnostics group tab to be active');
+	assert.notEqual(leafBar?.style.display, 'none', 'expected the Diagnostics leaf tab bar to be visible');
 	assert.ok(otelTabButton?.classList.contains('active'), 'expected the OTel Delta tab button to be active');
 	assert.ok(otelTabContent?.classList.contains('active'), 'expected the OTel Delta tab content to be active');
 });
@@ -400,7 +377,7 @@ test('a switchTab message (e.g. the What\'s New "Take me there" action) navigate
 	await harness.settle();
 
 	const doc = harness.window.document;
-	assert.ok(doc.querySelector('.group-tab[data-group="research"]')?.classList.contains('active'), 'expected the Research group tab to be active');
+	assert.ok(doc.querySelector('.group-tab[data-group="diagnostics"]')?.classList.contains('active'), 'expected the Diagnostics group tab to be active');
 	assert.ok(doc.querySelector('.tab[data-tab="otel-delta"]')?.classList.contains('active'), 'expected the OTel Delta tab button to be active');
 	assert.ok(doc.getElementById('tab-otel-delta')?.classList.contains('active'), 'expected the OTel Delta tab content to be active');
 });
@@ -419,7 +396,7 @@ test('a switchTab message that arrives before the layout renders still lands on 
 	await harness.settle();
 
 	const doc = harness.window.document;
-	assert.ok(doc.querySelector('.group-tab[data-group="research"]')?.classList.contains('active'), 'expected the Research group tab to be active');
+	assert.ok(doc.querySelector('.group-tab[data-group="diagnostics"]')?.classList.contains('active'), 'expected the Diagnostics group tab to be active');
 	assert.ok(doc.querySelector('.tab[data-tab="otel-delta"]')?.classList.contains('active'), 'expected the OTel Delta tab button to be active');
 });
 
@@ -517,29 +494,6 @@ test('session table pages its rows and a filter change returns to the first page
 	assert.match(doc.querySelector(`#data-table-root-${tableId} .data-table-page-info`)?.textContent ?? '', /1.*2/);
 });
 
-test('tool analysis tables sort by average tokens per call by default and escape tool names', async () => {
-	await preloadBundle();
-	const harness = bootWebviewUnsettled(buildInitialData({
-		toolCallStats: {
-			total: 13,
-			byTool: { read: 10, grep: 1, '<b>x</b>': 2 },
-			outputTokensByTool: { read: 100, grep: 500, '<b>x</b>': 40 },
-		},
-	}));
-	await harness.settle();
-	const tableId = 'diagnostics-tool-other';
-	const toolNames = () => tableRows(harness, tableId).map((row) => row.children[0].firstChild?.textContent.trim());
-
-	assert.deepEqual(toolNames(), ['grep', '<b>x</b>', 'read'], 'default order is avg tokens / call, highest first');
-	assert.equal(harness.window.document.querySelector(`#data-table-root-${tableId} td b`), null);
-
-	clickSort(harness, tableId, 'calls');
-	assert.deepEqual(toolNames(), ['read', '<b>x</b>', 'grep']);
-	clickSort(harness, tableId, 'tool');
-	clickSort(harness, tableId, 'tool');
-	assert.deepEqual(toolNames(), ['read', 'grep', '<b>x</b>'], 'second click on Tool sorts descending');
-});
-
 test('session folders table: most sessions first, a total footer, and links that survive a re-sort', async () => {
 	await preloadBundle();
 	const harness = bootWebviewUnsettled(buildInitialData({
@@ -580,14 +534,29 @@ test('Azure configuration details render as an unpaged key/value table', async (
 	assert.equal(pairs.length, 5);
 });
 
-test('skill usage table lists the most-invoked skills first', async () => {
+test('the Research group is gone and the tabs that stayed sit in the Diagnostics group', async () => {
 	await preloadBundle();
-	const harness = bootWebviewUnsettled(buildInitialData({
-		skillCallStats: { total: 6, byName: { alpha: 1, beta: 5 } },
-		skillDescriptions: { beta: 'Beta skill' },
-	}));
+	const harness = bootWebviewUnsettled(buildInitialData());
 	await harness.settle();
+	const doc = harness.window.document;
 
-	assert.deepEqual(cellTexts(harness, 'diagnostics-skill-usage', 0), ['beta', 'alpha']);
-	assert.deepEqual(cellTexts(harness, 'diagnostics-skill-usage', 1), ['Beta skill', '—']);
+	assert.equal(doc.querySelector('[data-group="research"]'), null);
+	const leafTabs = Array.from(doc.querySelectorAll('.leaf-tabs[data-group="diagnostics"] .tab')).map((tab: any) => tab.dataset.tab);
+	assert.deepEqual(leafTabs, ['report', 'sessions', 'cache', 'path-analyzer', 'model-usage', 'otel-delta']);
+	assert.match(doc.querySelector('.tab[data-tab="model-usage"]')?.textContent ?? '', /Pricing Check/);
+	for (const moved of ['tool-analysis', 'skill-usage', 'ttft']) {
+		assert.equal(doc.querySelector(`[data-tab="${moved}"]`), null, `${moved} has moved out of Diagnostics`);
+		assert.equal(doc.getElementById(`tab-${moved}`), null, `${moved} has moved out of Diagnostics`);
+	}
 });
+
+for (const moved of ['tool-analysis', 'skill-usage', 'ttft']) {
+	test(`a saved view state pointing at the removed ${moved} tab lands on the report`, async () => {
+		await preloadBundle();
+		const harness = bootWebviewUnsettled(buildInitialData(), { activeTab: moved });
+		await harness.settle();
+		const doc = harness.window.document;
+		assert.ok(doc.querySelector('.tab[data-tab="report"]')?.classList.contains('active'));
+		assert.ok(doc.querySelector('.group-tab[data-group="diagnostics"]')?.classList.contains('active'));
+	});
+}

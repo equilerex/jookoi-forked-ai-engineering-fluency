@@ -4,7 +4,7 @@
  */
 import type { TaskCategory, TaskCategoryBreakdown, TaskClassificationResult } from './taskClassification';
 import type { CacheBreakageResult, CacheBreakagePeriodStats } from './cacheBreakage';
-import type { HydraFusionSummary } from './hydrafusion';
+import type { HydraFusionSummary, HydraFusionRollup } from './hydrafusion';
 
 /**
  * Character-to-token ratio for a specific AI model.
@@ -212,7 +212,42 @@ export interface DailyTokenStats {
  * code, apply-button usage). For sessions that used several models these are
  * split by the model's share of the session's tokens.
  */
+/**
+ * One session's whole-session footprint for one model, kept so the Models tab
+ * can exclude mixed-model sessions and trim outlier sessions. Written once per
+ * session, on the day of its last activity (like the turn counters).
+ */
+export interface ModelSessionRecord {
+  /** True when the session used more than one model, so duration/LOC are token-share splits. */
+  mixed: boolean;
+  /** This model's token-share of the session (1 for a single-model session). */
+  share: number;
+  inputTokens: number;
+  outputTokens: number;
+  cachedReadTokens: number;
+  cost: number;
+  /** Token-share of the session's exact Copilot billing in USD; absent when the session has none. */
+  exactCost?: number;
+  calls: number;
+  editTurns: number;
+  oneShotEditTurns: number;
+  retries: number;
+  selfCorrections: number;
+  /** Token-share-attributed lines added + removed. */
+  loc: number;
+  /** Token-share-attributed active duration in ms; 0 when unknown. */
+  activeDurationMs: number;
+  applies: number;
+  codeBlocks: number;
+  /** This session's turn-latency histogram for the model; absent when no turn was timed. */
+  turnLatency?: LatencyHistogram;
+  timedOutputTokens?: number;
+  timedOutputMs?: number;
+}
+
 export interface DailyModelEfficiencyEntry extends ModelEfficiencyCounters {
+  /** Per-session records behind this entry's counters. Absent on data written before records existed. */
+  sessionRecords?: ModelSessionRecord[];
   /** Sessions that used this model at all. A 2-model session adds 1 to both models. */
   sessions: number;
   /**
@@ -243,15 +278,31 @@ export interface DailyModelEfficiency {
 export type ChartTimeWindow = 'today' | 'last7' | 'last30' | 'last90' | 'currentMonth' | 'allTime';
 
 /** Aggregated data for one time window (day/week/month) in the chart. */
+/**
+ * One Chart.js dataset the chart webview draws. Every dataset the shared builder
+ * (src/chartDataBuilder.ts) emits has this shape, and the webview reads it from the same
+ * type, so a field it relies on cannot go missing in one host without a compile error.
+ */
+export interface ChartDataset {
+  label: string;
+  /** One value per bar, aligned with the period's `labels`. */
+  data: number[];
+  backgroundColor: string;
+  borderColor: string;
+  borderWidth: number;
+  /** Repository datasets: the full repository URL behind the display `label`. */
+  fullRepo?: string;
+}
+
 export interface ChartPeriodData {
   labels: string[];
   /** ISO date keys for each bar, used for time-window filtering. Day=YYYY-MM-DD, week=Monday YYYY-MM-DD, month=YYYY-MM. */
   periodKeys: string[];
   tokensData: number[];
   sessionsData: number[];
-  modelDatasets: object[];
-  editorDatasets: object[];
-  repositoryDatasets: object[];
+  modelDatasets: ChartDataset[];
+  editorDatasets: ChartDataset[];
+  repositoryDatasets: ChartDataset[];
   /** Number of bars / data points in this period. */
   periodCount: number;
   totalTokens: number;
@@ -267,9 +318,9 @@ export interface ChartPeriodData {
   locData?: number[];
   linesAddedData?: number[];
   linesRemovedData?: number[];
-  languageDatasets?: object[];
-  locEditorDatasets?: object[];
-  locRepositoryDatasets?: object[];
+  languageDatasets?: ChartDataset[];
+  locEditorDatasets?: ChartDataset[];
+  locRepositoryDatasets?: ChartDataset[];
   totalLinesAdded?: number;
   totalLinesRemoved?: number;
   avgLocPerPeriod?: number;
@@ -278,36 +329,36 @@ export interface ChartPeriodData {
    * Each dataset's `data` array aligns with `labels`; values are estimated costs in USD.
    * Computed from per-day `editorModelUsage` using the appropriate pricing source for each editor.
    */
-  editorCostDatasets?: object[];
+  editorCostDatasets?: ChartDataset[];
   /**
    * Cost datasets split by billing provider — one dataset per provider group.
    * Groups: "GitHub Copilot" (all Copilot surfaces), "Anthropic" (Claude Code, etc.),
    * "Google" (Gemini CLI, etc.), "Mistral AI", "OpenAI", etc.
    * Copilot group uses AI-Credit pricing; all others use direct provider pricing.
    */
-  billingGroupCostDatasets?: object[];
+  billingGroupCostDatasets?: ChartDataset[];
   /** Token datasets split by task category (e.g. "Coding", "Debugging", "Testing") — one stacked-bar dataset per category. */
-  taskCategoryDatasets?: object[];
+  taskCategoryDatasets?: ChartDataset[];
   /** Task-token datasets split by category. */
-  taskCategoryTokenDatasets?: object[];
+  taskCategoryTokenDatasets?: ChartDataset[];
   /** Task-session datasets split by category. */
-  taskCategorySessionDatasets?: object[];
+  taskCategorySessionDatasets?: ChartDataset[];
   /** Task-cost datasets split by category. */
-  taskCategoryCostDatasets?: object[];
+  taskCategoryCostDatasets?: ChartDataset[];
   /**
    * Cost datasets split by model — one dataset per top model (by total cost), plus an
    * "Other models" dataset for the remainder. Each model's usage is priced using the
    * correct pricing source per editor it was used from.
    */
-  modelCostDatasets?: object[];
+  modelCostDatasets?: ChartDataset[];
   /** Session-count datasets split by model — one stacked-bar dataset per model. */
-  modelSessionsDatasets?: object[];
+  modelSessionsDatasets?: ChartDataset[];
   /** Session-count datasets split by editor — one stacked-bar dataset per editor. */
-  editorSessionsDatasets?: object[];
+  editorSessionsDatasets?: ChartDataset[];
   /** Session-count datasets split by billing provider — one stacked-bar dataset per provider group. */
-  providerSessionsDatasets?: object[];
+  providerSessionsDatasets?: ChartDataset[];
   /** Token datasets split by billing provider — one stacked-bar dataset per provider group. */
-  providerTokensDatasets?: object[];
+  providerTokensDatasets?: ChartDataset[];
 }
 
 /** Shape of the data payload sent to the chart webview (via window.__INITIAL_CHART__ or postMessage). */
@@ -315,12 +366,12 @@ export interface ChartDataPayload {
   labels: string[];
   tokensData: number[];
   sessionsData: number[];
-  modelDatasets: object[];
-  editorDatasets: object[];
+  modelDatasets: ChartDataset[];
+  editorDatasets: ChartDataset[];
   editorTotalsMap: Record<string, number>;
-  repositoryDatasets: object[];
+  repositoryDatasets: ChartDataset[];
   repositoryTotalsMap: Record<string, number>;
-  taskCategoryDatasets?: object[];
+  taskCategoryDatasets?: ChartDataset[];
   dailyCount: number;
   totalTokens: number;
   avgTokensPerDay: number;
@@ -434,10 +485,14 @@ export interface ThinkingEffortUsage {
 }
 
 export interface SessionUsageAnalysis {
+  /** Numeric Copilot Fusion routing rollup (Copilot CLI sessions that routed through it). Absent otherwise. */
+  hydraFusion?: HydraFusionRollup;
   toolCalls: ToolCallUsage;
   modeUsage: ModeUsage;
   /** Per-interaction autonomy level (autopilot/auto vs supervised). Absent when no surface reported one. */
   autonomyUsage?: AutonomyUsage;
+  /** Custom agents the user selected, per request. Absent when the session used none. */
+  agentUsage?: AgentUsage;
   contextReferences: ContextReferenceUsage;
   mcpTools: McpToolUsage;
   /** Agent-skill invocation counts for this session. See {@link SkillCallUsage}. */
@@ -496,6 +551,41 @@ export interface SessionUsageAnalysis {
    * carries no user-message text.
    */
   firstUserPrompt?: string;
+  /** Vendor-reported session-level stats (Mistral Vibe meta.json). Absent for other formats. */
+  vendorStats?: VendorSessionStats;
+}
+
+/** A sum plus sample count, so rates and durations merge across sessions without averaging averages. */
+export interface SampledSum {
+  samples: number;
+  sum: number;
+}
+
+/**
+ * Session-level numeric stats a vendor's own log reports (Mistral Vibe `meta.json` `stats`).
+ * Every field is optional and additive, so the same shape holds one session or a merged period.
+ * An absent stat stays absent; it is never zero-filled.
+ */
+export interface VendorSessionStats {
+  /** Vendor-reported generation speed in tokens/second (sum + session count). */
+  tokensPerSecond?: SampledSum;
+  /** Duration of each session's last turn in ms (sum + session count). */
+  lastTurnDurationMs?: SampledSum;
+  /** Vendor-reported cost in dollars. Cross-check only: cost estimates stay on calculateEstimatedCost. */
+  reportedCostDollars?: number;
+  /** Agent steps (LLM round-trips) the vendor counted. */
+  steps?: number;
+  /** Session-level tool-call outcomes; the vendor does not attribute them per tool. */
+  toolOutcomes?: VendorToolOutcomes;
+}
+
+/** Tool-call outcome counters; `rejected` and `hookDenied` are calls declined rather than failed. */
+export interface VendorToolOutcomes {
+  succeeded?: number;
+  failed?: number;
+  rejected?: number;
+  agreed?: number;
+  hookDenied?: number;
 }
 
 /**
@@ -564,6 +654,25 @@ export interface AutonomyUsage {
   supervised: number; // Copilot "interactive" / "default", Claude Code "default" / "acceptEdits"
   plan: number; // Plan mode
   other: number; // Recognised-but-unclassified values (e.g. Claude "bypassPermissions")
+}
+
+/** Where a custom agent definition lives: `.github/agents`, `.claude/agents`, the user profile, or elsewhere/unknown. */
+export type AgentSource = 'github' | 'claude' | 'user' | 'other';
+
+/** Requests handled under one custom agent, keyed by the name exactly as the session log shows it. */
+export interface AgentUsageEntry {
+  sessions: number;
+  requests: number;
+  source: AgentSource;
+}
+
+/**
+ * Custom agents the user selected (agent picker, @agent, /agent), not subagents the model
+ * delegated to. Sources: VS Code Copilot Chat `modeInfo` / `inputState.mode`, Copilot CLI
+ * `subagent.selected`.
+ */
+export interface AgentUsage {
+  byAgent: Record<string, AgentUsageEntry>;
 }
 
 export interface ContextReferenceUsage {
@@ -649,6 +758,24 @@ export interface ModelEfficiencyCounters {
   cachedReadTokens: number;
   /** Estimated cost in USD (provider/API rates). Folded in at aggregation time. */
   cost: number;
+  /**
+   * Exact GitHub Copilot billing in USD (from `totalNanoAiu`), summed over the sessions that
+   * reported it. Kept apart from the estimated `cost` — the two are different bases and are
+   * never added. Absent when no folded session carried exact billing.
+   */
+  exactCost?: number;
+  /** Sessions whose exact billing is included in `exactCost`; compare with `sessions` to see whether the model is fully covered. */
+  exactCostSessions?: number;
+  /**
+   * End-to-end response duration of this model's turns (user message to the last
+   * assistant/tool event of the turn, so it includes tool execution and approval
+   * waits). Absent when no turn of this model carried both timestamps — never zero-filled.
+   */
+  turnLatency?: LatencyHistogram;
+  /** Actual output tokens of the timed turns that reported them; the numerator of output tokens/second. */
+  timedOutputTokens?: number;
+  /** Elapsed ms of exactly those turns (a subset of {@link turnLatency}); the denominator of output tokens/second. */
+  timedOutputMs?: number;
 }
 
 export interface ModelEfficiencyUsage {
@@ -1181,10 +1308,14 @@ export interface AutomaticCompactionStats {
 
 export interface UsageAnalysisPeriod {
   sessions: number;
+  /** Summed Copilot Fusion routing rollup across the period's sessions. Absent when none routed. */
+  hydraFusion?: HydraFusionRollup;
   toolCalls: ToolCallUsage;
   modeUsage: ModeUsage;
   /** Aggregated per-interaction autonomy level across the period's sessions. */
   autonomyUsage?: AutonomyUsage;
+  /** Aggregated custom-agent usage across the period's sessions. Absent when none used one. */
+  agentUsage?: AgentUsage;
   contextReferences: ContextReferenceUsage;
   mcpTools: McpToolUsage;
   /** Aggregated agent-skill invocation counts across the period's sessions. See {@link SkillCallUsage}. */
@@ -1248,6 +1379,8 @@ export interface UsageAnalysisPeriod {
    * token counts.
    */
   cacheBreakage?: CacheBreakagePeriodStats;
+  /** Vendor-reported session stats summed across the period's sessions. Absent when none carried them. */
+  vendorStats?: VendorSessionStats;
 }
 
 /** Aggregated context-window usage for one usage-analysis period. */
@@ -1266,6 +1399,14 @@ export interface ContextWindowStats {
 
 /** Fraction of a session's context window that counts as "almost full". */
 export const CONTEXT_NEAR_LIMIT_RATIO = 0.8;
+
+/**
+ * A key-based translation function, injected into pure modules (insightsEngine.ts) that
+ * render localized text without importing the bundles. Hosts build one with
+ * `createLocalization(bundles).createTranslator()` from `src/localization.ts` (bound to the
+ * shipped bundles in `vscode-extension/src/l10nCore.ts` and `cli/src/l10n.ts`), or pass `l10n.ts`'s `t()`.
+ */
+export type Translate = (key: string, ...args: Array<string | number | boolean>) => string;
 
 /**
  * How often a period's sessions ran out of context window, counted per
@@ -1355,6 +1496,8 @@ export interface ActualUsage {
 export interface ChatTurn {
   turnNumber: number;
   timestamp: string | null;
+  /** ISO time of the last assistant/tool event of this turn, when the source records it. Absent means unknown, never an estimate. */
+  endTimestamp?: string | null;
   mode: "ask" | "edit" | "agent" | "plan" | "customAgent" | "cli";
   userMessage: string;
   assistantResponse: string;
@@ -1422,7 +1565,7 @@ export interface SessionLogData {
    */
   editorNote?: { items: string[] };
   /**
-   * Per-leg HydraFusion routing detail (Copilot CLI sessions that used the
+   * Per-leg Copilot Fusion routing detail (Copilot CLI sessions that used the
    * `hydrafusion` model). Absent for every other session, including CLI sessions
    * that never routed through it. See `analyzeHydraFusionSession` in `hydrafusion.ts`.
    */

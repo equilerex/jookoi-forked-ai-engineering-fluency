@@ -1,5 +1,5 @@
 import type { TokenEstimator } from '../../../../src/types';
-import { EDITOR_ICON_MAP as _EDITOR_ICON_MAP, getEditorIconByName } from '../../editorIcons';
+import { EDITOR_ICON_MAP as _EDITOR_ICON_MAP, getEditorIconByName } from '../../../../src/editorIcons';
 import { getWindowData } from '../../../../src/webview/shared/dataLoader';
 
 const _estimatorsData = getWindowData<{ estimators: Record<string, number> }>('__TOKEN_ESTIMATORS__');
@@ -22,9 +22,6 @@ export function setFormatLocale(locale?: string): void {
 export function setCompactNumbers(enabled: boolean): void {
 	compactNumbersEnabled = enabled;
 }
-
-/** Union of all known editor display names that have explicit icon mappings. */
-export type EditorName = keyof typeof _EDITOR_ICON_MAP;
 
 /**
  * Re-export canonical map for callers that need the full record.

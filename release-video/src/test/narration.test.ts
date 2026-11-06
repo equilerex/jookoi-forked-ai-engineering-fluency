@@ -37,17 +37,17 @@ test('a title that already ends in "tab" does not get a second one', () => {
 });
 
 test('a nested tab is named the way people say it, not the way the UI draws it', () => {
-	// The catalog title is "Research → TTFT"; spoken verbatim the arrow becomes
-	// "Research then TTFT", which is nobody's name for that tab.
+	// Spoken verbatim, the arrow in "Settings → Display" becomes "Settings then Display",
+	// which is nobody's name for that tab.
 	const text = featureNarration(
 		feature({
-			title: 'Research → TTFT',
+			title: 'Settings → Display',
 			kind: 'tab',
-			surface: { view: 'diagnostics', tab: 'ttft' },
+			surface: { view: 'diagnostics', tab: 'display' },
 		}),
 		{ index: 2 },
 	);
-	assert.match(text, /a new tab called TTFT, under Research\./);
+	assert.match(text, /a new tab called Display, under Settings\./);
 	assert.doesNotMatch(text, /then/);
 });
 
@@ -56,12 +56,12 @@ test('a section is addressed by its tab as well as its view', () => {
 		feature({
 			title: 'Copilot Memory Files',
 			kind: 'section',
-			description: 'A new section on the Tools tab showing how much memory has accumulated.',
-			surface: { view: 'usage', tab: 'tools', anchor: 'section-memory-files' },
+			description: 'A new section on the Workspace Health tab showing how much memory has accumulated.',
+			surface: { view: 'usage', tab: 'health', anchor: 'section-memory-files' },
 		}),
 		{ index: 0 },
 	);
-	assert.match(text, /on the Tools and Integrations tab/);
+	assert.match(text, /on the Workspace Health tab/);
 	assert.match(text, /a new section called Copilot Memory Files/);
 });
 

@@ -517,8 +517,10 @@ function _ejtsHandleShutdown(event: Record<string, unknown>, state: EjtsState): 
 	if (!state.cliShutdown) { state.cliShutdown = createCliShutdownAccumulator(); }
 	const delta = applyCliShutdownMetrics(state.cliShutdown, data.modelMetrics as Record<string, CliShutdownModelMetricsEntry>);
 	if (delta > 0 && event.timestamp) {
-		const dayKey = toLocalDayKey(new Date(String(event.timestamp)));
-		if (dayKey && dayKey !== 'Inval') {
+		const date = new Date(String(event.timestamp));
+		// toLocalDayKey of an invalid date is 'NaN-NaN-NaN', so validate the date itself.
+		if (!isNaN(date.getTime())) {
+			const dayKey = toLocalDayKey(date);
 			state.dailyActualTokens[dayKey] = (state.dailyActualTokens[dayKey] || 0) + delta;
 		}
 	}
@@ -779,39 +781,6 @@ function _eatdlProcessLlmRequest(event: Record<string, unknown>, acc: EatdlAcc):
 	entry.outputTokens += out;
 	entry.cachedTokens += cached;
 	acc.modelBreakdown[model] = entry;
-}
-
-/**
- * Extract token totals from all `llm_request` events in a Copilot Chat debug log.
- *
- * Agent-mode sessions make multiple LLM API calls per user turn. Only the last
- * call's tokens are stored in the chat session file; the debug log records every
- * call. Summing across all `llm_request` events gives the true session total.
- *
- * Returns null when no `llm_request` events are found (debug logging disabled,
- * or file is empty / does not exist).
- */
-type EatdlState = { inputTokens: number; outputTokens: number; cachedTokens: number; modelTurns: number; modelBreakdown: Record<string, { inputTokens: number; outputTokens: number; cachedTokens: number }> };
-
-function _eatdlProcessEvent(event: unknown, state: EatdlState): void {
-	const ev = event as Record<string, unknown>;
-	if (ev['type'] !== 'llm_request') { return; }
-	state.modelTurns++;
-	const attrs = ev['attrs'] as Record<string, unknown> | undefined;
-	const inp = typeof attrs?.['inputTokens'] === 'number' ? attrs['inputTokens'] as number : 0;
-	const out = typeof attrs?.['outputTokens'] === 'number' ? attrs['outputTokens'] as number : 0;
-	const cached = typeof attrs?.['cachedTokens'] === 'number' ? attrs['cachedTokens'] as number : 0;
-	state.inputTokens += inp;
-	state.outputTokens += out;
-	state.cachedTokens += cached;
-	const model = typeof attrs?.['model'] === 'string' && attrs['model'] ? attrs['model'] as string : '';
-	if (model) {
-		const entry = state.modelBreakdown[model] ?? { inputTokens: 0, outputTokens: 0, cachedTokens: 0 };
-		entry.inputTokens += inp;
-		entry.outputTokens += out;
-		entry.cachedTokens += cached;
-		state.modelBreakdown[model] = entry;
-	}
 }
 
 /** One time-to-first-token observation extracted from an `llm_request` debug-log event. */
@@ -1179,7 +1148,7 @@ export function applyDelta(state: unknown, delta: unknown): unknown {
 	if (!Array.isArray(k) || k.length === 0) { return state; }
 
 	const pathArr = k.map(String);
-	let root: Record<string, unknown> | unknown[] = typeof state === 'object' && state !== null
+	const root: Record<string, unknown> | unknown[] = typeof state === 'object' && state !== null
 		? state as Record<string, unknown> | unknown[] : {};
 	let current: Record<string, unknown> | unknown[] = root;
 

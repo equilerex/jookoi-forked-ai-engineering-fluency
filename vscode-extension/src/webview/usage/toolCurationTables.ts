@@ -5,8 +5,6 @@ import { getDataTableState, renderDataTable, renderDataTableFilter, type DataTab
 
 type McpServerEntry = ToolCurationAnalysis['underusedMcpServers'][number];
 
-export type CurationTableId = 'mcp' | 'builtin' | 'skills';
-
 const curationLinkStyle = 'background:none;border:none;padding:0;cursor:pointer;color:var(--link-color);font-size:11px;text-decoration:underline;';
 const defaultMcpConfigLink = '<code>.vscode/mcp.json</code>'; // i18n-exempt: configuration filename, not translatable prose.
 
@@ -17,9 +15,10 @@ export function estimateToolOverheadTokens(name: string, description: string | u
 export function getSkillSourceLabel(skill: AvailableToolEntry): string {
 	if (skill.pluginName) { return localizeFormat('usage.toolCuration.source.plugin', skill.pluginName); }
 	if (!skill.skillPath) { return '—'; }
-	if (skill.skillPath.startsWith('.github/skills')) { return localize('usage.toolCuration.source.workspaceGithub'); }
-	if (skill.skillPath.startsWith('.claude/skills')) { return localize('usage.toolCuration.source.workspaceClaude'); }
-	if (skill.skillPath.startsWith('.agents/skills')) { return localize('usage.toolCuration.source.workspaceAgents'); }
+	const skillPath = skill.skillPath.replace(/\\/g, '/');
+	if (skillPath.startsWith('.github/skills')) { return localize('usage.toolCuration.source.workspaceGithub'); }
+	if (skillPath.startsWith('.claude/skills')) { return localize('usage.toolCuration.source.workspaceClaude'); }
+	if (skillPath.startsWith('.agents/skills')) { return localize('usage.toolCuration.source.workspaceAgents'); }
 	return localize('usage.toolCuration.source.user');
 }
 
@@ -176,17 +175,6 @@ function renderBuiltinTable(tools: AvailableToolEntry[]): string {
 		columns,
 		initialSort: { columnId: 'overhead', direction: 'desc' },
 	});
-}
-
-export function renderCurationTable(tableId: CurationTableId, analysis: ToolCurationAnalysis): string {
-	switch (tableId) {
-		case 'mcp':
-			return renderMcpTable(analysis.underusedMcpServers, analysis.estimatedPromptBloat);
-		case 'builtin':
-			return renderBuiltinTable(analysis.availableTools.filter(tool => tool.source === 'builtin'));
-		case 'skills':
-			return renderSkillsTable(analysis.unusedTools.filter(tool => tool.source === 'skill'));
-	}
 }
 
 export function buildUnusedMcpHtml(

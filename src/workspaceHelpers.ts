@@ -2,7 +2,6 @@
  * Workspace resolution and utility helper functions.
  * Pure functions extracted from CopilotTokenTracker.
  */
-import * as vscode from 'vscode';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
@@ -29,6 +28,7 @@ import {
 import { withErrorRecoverySync } from './utils/errors';
 import { isGuidMcpTool, lookupKnownToolName } from './utils/toolUtils';
 import { isCopilotAppClientName } from './copilotCliStore';
+import { isCustomAgentFile } from './agentUsage';
 
 export {
 	dedupeByNormalizedKeyKeepGreatest,
@@ -375,7 +375,7 @@ export function scanWorkspaceCustomizationFiles(workspaceFolderPath: string): Cu
 function getModeFromAgentKind(id: string | undefined): 'agent' | 'plan' | 'customAgent' {
 	if (!id || id === 'agent') { return 'agent'; }
 	if (id.includes('plan-agent/Plan.agent.md')) { return 'plan'; }
-	if (id.includes('.agent.md')) { return 'customAgent'; }
+	if (isCustomAgentFile(id)) { return 'customAgent'; }
 	return 'agent';
 }
 
@@ -541,7 +541,7 @@ export function getRepoDisplayName(repoUrl: string): string {
 	if (!repoUrl || repoUrl === 'Unknown') { return 'Unknown'; }
 
 	// Remove .git suffix if present
-	let url = repoUrl.replace(/\.git$/, '');
+	const url = repoUrl.replace(/\.git$/, '');
 
 	// Handle SSH URLs like git@github.com:owner/repo
 	if (url.includes('@') && url.includes(':')) {
@@ -1077,6 +1077,9 @@ function detectCopilotFamilyFromPath(lowerPath: string): string | undefined {
 	return undefined;
 }
 
+/** Editor label for Claude Code sessions whose entrypoint is the VS Code extension (`claude-vscode`). */
+export const CLAUDE_CODE_VSCODE_LABEL = 'Claude Code (VS Code)';
+
 /**
  * Peek at the start of a Claude Code session file (~/.claude/projects/**) to find the
  * `entrypoint` field and distinguish the standalone Claude Desktop app, the terminal CLI,
@@ -1084,7 +1087,7 @@ function detectCopilotFamilyFromPath(lowerPath: string): string | undefined {
  * by path alone — only file content (the `entrypoint` field on early JSONL events) tells them
  * apart. Observed real-world values are "claude-desktop" and "cli" (not "claude-cli" — the
  * field is the short form); any other/unknown value (e.g. a VS Code extension entrypoint)
- * falls back to the generic "Claude Code" label.
+ * falls back to the generic "Claude Code" label; "claude-vscode" maps to "Claude Code (VS Code)".
  * Bounded to the first 64KB so classification stays cheap even for large session files.
  * @internal
  */
@@ -1128,6 +1131,7 @@ function readClaudeCodeEditorVariant(filePath: string): string | undefined {
 				try { event = JSON.parse(trimmed); } catch { continue; } // partial/truncated line
 				if (event?.entrypoint === 'claude-desktop') { return 'Claude Desktop'; }
 				if (event?.entrypoint === 'cli') { return 'Claude Code CLI'; }
+				if (event?.entrypoint === 'claude-vscode') { return CLAUDE_CODE_VSCODE_LABEL; }
 				if (event?.entrypoint) { return 'Claude Code'; }
 			}
 		} finally {
@@ -1316,7 +1320,7 @@ export const SYNCED_INTERACTION_MODE_LABELS: Readonly<Record<string, string>> = 
  * Leaves every other editor label untouched.
  */
 export function refineEditorLabelForInteractionModeSplit(filePath: string, baseLabel: string): string {
-	if (baseLabel === 'Claude Code') { return SYNCED_INTERACTION_MODE_LABELS.claudeVsCode; }
+	if (baseLabel === 'Claude Code' || baseLabel === CLAUDE_CODE_VSCODE_LABEL) { return SYNCED_INTERACTION_MODE_LABELS.claudeVsCode; }
 	if (baseLabel === 'Copilot CLI' && isCopilotAppSessionFile(filePath)) { return SYNCED_INTERACTION_MODE_LABELS.cliApp; }
 	return baseLabel;
 }

@@ -1,4 +1,3 @@
-// @ts-nocheck
 import test from 'node:test';
 import * as assert from 'node:assert/strict';
 import * as fs from 'node:fs';
@@ -449,15 +448,30 @@ test('detectClaudeCodeEditorVariant: returns Claude Code CLI for entrypoint cli'
         }
 });
 
-test('detectClaudeCodeEditorVariant: returns Claude Code for any other entrypoint (e.g. VS Code extension)', () => {
+test('detectClaudeCodeEditorVariant: returns Claude Code (VS Code) for entrypoint claude-vscode', () => {
         const dir = fs.mkdtempSync(path.join(process.cwd(), 'claude-variant-'));
         const file = path.join(dir, 'session.jsonl');
         fs.writeFileSync(file, JSON.stringify({ type: 'user', entrypoint: 'claude-vscode', timestamp: '2026-01-01T00:00:00.000Z' }) + '\n');
+        try {
+                assert.equal(detectClaudeCodeEditorVariant(file), 'Claude Code (VS Code)');
+        } finally {
+                fs.rmSync(dir, { recursive: true, force: true });
+        }
+});
+
+test('detectClaudeCodeEditorVariant: an unknown entrypoint still falls back to the generic Claude Code label', () => {
+        const dir = fs.mkdtempSync(path.join(process.cwd(), 'claude-variant-'));
+        const file = path.join(dir, 'session.jsonl');
+        fs.writeFileSync(file, JSON.stringify({ type: 'user', entrypoint: 'sdk-ts', timestamp: '2026-01-01T00:00:00.000Z' }) + '\n');
         try {
                 assert.equal(detectClaudeCodeEditorVariant(file), 'Claude Code');
         } finally {
                 fs.rmSync(dir, { recursive: true, force: true });
         }
+});
+
+test('refineEditorLabelForInteractionModeSplit: the Claude Code (VS Code) label also syncs as Claude (VS Code)', () => {
+        assert.equal(refineEditorLabelForInteractionModeSplit('/home/user/.claude/projects/hash/session.jsonl', 'Claude Code (VS Code)'), 'Claude (VS Code)');
 });
 
 test('detectClaudeCodeEditorVariant: defaults to Claude Code when file is missing or has no entrypoint', () => {
@@ -830,8 +844,6 @@ test('extractMcpServerName: GUID-keyed MCP tool returns "Claude MCP"', () => {
 });
 // ── scanWorkspaceCustomizationFiles — category detection ─────────────────
 
-import * as fs from 'node:fs';
-import * as os from 'node:os';
 import { scanWorkspaceCustomizationFiles } from '../../../src/workspaceHelpers';
 
 test('scanWorkspaceCustomizationFiles: returns empty array for non-existent dir', () => {
@@ -2027,7 +2039,7 @@ test('resolveSessionWorkspaceName: app-store worktree workspaceFolderPath resolv
 // Regression coverage for the exact bug class fixed here: resolveSessionWorkspaceName must
 // route every workspaceFolderPath through the worktree-aware getRepoNameFromWorkspacePath(),
 // not a plain path.basename(). Each of these mirrors a layout already covered by
-// utils-pathUtils.test.ts's getRepoNameFromWorkspacePath suite so a future revert to
+// utilsPathUtils.test.ts's getRepoNameFromWorkspacePath suite so a future revert to
 // path.basename() fails broadly, not just for a single naming convention.
 const worktreeWorkspaceFolderPathCases: { name: string; workspaceFolderPath: string; expected: string }[] = [
     {
@@ -2153,4 +2165,55 @@ test('resolveDebugLogCandidatePaths: returns undefined for a non-UUID session fi
 test('resolveDebugLogCandidatePaths: returns undefined for a UUID-named file outside workspaceStorage', () => {
     const sessionFile = path.join('home', 'user', '.copilot', 'session-state', `${TTFT_SESSION_ID}.jsonl`);
     assert.equal(resolveDebugLogCandidatePaths(sessionFile), undefined);
+});
+
+// ---------------------------------------------------------------------------
+// Mutation-survivor coverage for workspaceHelpers (refs #2341)
+// ---------------------------------------------------------------------------
+
+import { extractWorkspaceIdFromSessionPath as extractWsIdForMutants } from '../../../src/workspaceHelpers';
+
+function isStaleAfterAgeDays(ageDays: number): boolean {
+    const tmpDir = fs.mkdtempSync(path.join(process.cwd(), 'wh-stale-edge-'));
+    try {
+        const githubDir = path.join(tmpDir, '.github');
+        fs.mkdirSync(githubDir);
+        const filePath = path.join(githubDir, 'copilot-instructions.md');
+        fs.writeFileSync(filePath, '# Instructions');
+        const mtime = new Date(Date.now() - ageDays * 24 * 60 * 60 * 1000);
+        fs.utimesSync(filePath, mtime, mtime);
+        const file = scanWorkspaceCustomizationFiles(tmpDir).find(f => f.path.includes('copilot-instructions.md'));
+        assert.ok(file, 'should find the file');
+        return file!.isStale;
+    } finally {
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+}
+
+test('scanWorkspaceCustomizationFiles: staleness window is 90 days (89.9 fresh, 90.1 stale)', () => {
+    // Pins each unit factor (24 * 60 * 60 * 1000) and the > comparison direction
+    assert.equal(isStaleAfterAgeDays(89.9), false);
+    assert.equal(isStaleAfterAgeDays(90.1), true);
+});
+
+test('scanWorkspaceCustomizationFiles: entry exposes exact icon and label from the pattern', () => {
+    const tmpDir = fs.mkdtempSync(path.join(process.cwd(), 'wh-label-'));
+    try {
+        fs.mkdirSync(path.join(tmpDir, '.github'));
+        fs.writeFileSync(path.join(tmpDir, '.github', 'copilot-instructions.md'), '# x');
+        const file = scanWorkspaceCustomizationFiles(tmpDir).find(f => f.path.includes('copilot-instructions.md'));
+        assert.ok(file);
+        assert.equal(file!.icon, '📋');
+        assert.equal(file!.label, 'Instructions');
+        assert.equal(file!.name, 'copilot-instructions.md');
+    } finally {
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+});
+
+test('extractWorkspaceIdFromSessionPath: marker as final segment yields undefined, following segment is returned', () => {
+    assert.equal(extractWsIdForMutants('/home/u/Code/User/workspaceStorage'), undefined);
+    assert.equal(extractWsIdForMutants('/home/u/Code/User/workspaceStorage/abc'), 'abc');
+    assert.equal(extractWsIdForMutants('/home/u/Code/User/WorkspaceStorage/abc/x.json'), 'abc');
+    assert.equal(extractWsIdForMutants('/home/u/Code/User/globalStorage/x.json'), undefined);
 });

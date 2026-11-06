@@ -963,7 +963,7 @@ background: var(--bg-tertiary);
 	white-space: nowrap;
 }
 
-/* Recent Sessions pill filter bar (Editor / Vendor / Model / HydraFusion) */
+/* Recent Sessions pill filter bar (Editor / Vendor / Model / Copilot Fusion) */
 .session-filter-bar {
 	display: flex;
 	flex-direction: column;
@@ -1203,13 +1203,73 @@ background: var(--bg-tertiary);
 	font-size: 11px;
 }
 
-.worktree-delete-link {
-	margin-left: 8px;
-	color: var(--vscode-errorForeground, #f14c4c);
+.worktree-row-actions {
+	display: flex;
+	gap: 6px;
+	justify-content: flex-start;
 }
 
-.worktree-delete-link:hover {
-	text-decoration: underline;
+.worktree-row-btn {
+	display: inline-flex;
+	align-items: center;
+	gap: 4px;
+	padding: 2px 10px;
+	font-size: 12px;
+	color: var(--text-primary);
+	background: var(--bg-tertiary);
+	border: 1px solid var(--border-subtle);
+	border-radius: 4px;
+	cursor: pointer;
+}
+
+.worktree-row-btn:hover:not(:disabled) {
+	border-color: var(--link-color);
+}
+
+.worktree-row-btn.danger {
+	color: var(--vscode-errorForeground);
+	border-color: var(--vscode-errorForeground);
+	background: transparent;
+}
+
+.worktree-row-btn.danger:hover:not(:disabled) {
+	background: var(--vscode-errorForeground);
+	color: var(--vscode-editor-background);
+}
+
+.worktree-row-btn:disabled {
+	opacity: 0.6;
+	cursor: default;
+}
+
+.worktree-repo-badge {
+	display: inline-block;
+	margin-right: 8px;
+	font-size: 12px;
+	color: var(--text-muted);
+}
+
+.worktree-repo-badge.active {
+	color: var(--link-color);
+	font-weight: 600;
+}
+
+/* Stays visible while the user scrolls the (long) repository table during a cleanup. */
+.worktree-cleanup-sticky {
+	position: sticky;
+	top: 0;
+	z-index: 5;
+	background: var(--bg-secondary, var(--bg-tertiary));
+}
+
+.worktree-cleanup-current {
+	margin: 4px 0 8px;
+}
+
+.worktree-cleanup-recovered {
+	margin-top: 4px;
+	font-size: 15px;
+	font-weight: 600;
 }
 
 .worktree-caret {
@@ -1894,3 +1954,86 @@ background: var(--bg-tertiary);
 .tool-exec-table .tool-exec-num {
 	white-space: nowrap;
 }
+
+/* Status badges (statusBadgeHtml): tinted from the shared theme tokens so they follow light, dark and high-contrast themes */
+.status-badge {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	width: 20px;
+	height: 20px;
+	border-radius: 4px;
+	font-size: 12px;
+	font-weight: 700;
+	flex-shrink: 0;
+	color: var(--status-badge-color);
+	background: color-mix(in srgb, var(--status-badge-color) 20%, transparent);
+	border: 1px solid color-mix(in srgb, var(--status-badge-color) 50%, transparent);
+}
+
+.status-badge--fresh { --status-badge-color: var(--success-fg); }
+.status-badge--stale { --status-badge-color: var(--warning-fg); }
+.status-badge--unknown { --status-badge-color: var(--text-muted); }
+.status-badge--missing { --status-badge-color: var(--error-fg); }
+
+/* Output tokens by tool family */
+.tool-family-configure {
+	margin-bottom: 10px;
+	font-size: 12px;
+}
+
+.tool-family-link {
+	background: none;
+	border: none;
+	padding: 0;
+	color: var(--link-color);
+	cursor: pointer;
+	font-size: inherit;
+	text-decoration: underline;
+	text-underline-offset: 2px;
+}
+
+.tool-family-link:hover {
+	opacity: 0.8;
+}
+
+.tool-family-group {
+	margin-bottom: 16px;
+}
+
+.tool-family-heading {
+	margin: 8px 0 4px;
+	font-size: 13px;
+	font-weight: 600;
+	color: var(--text-secondary);
+}
+
+.tool-family-description {
+	margin-left: 6px;
+	font-size: 11px;
+	font-weight: 400;
+	color: var(--text-muted);
+}
+
+.tool-type-badge {
+	padding: 1px 5px;
+	border-radius: 3px;
+	font-size: 10px;
+	white-space: nowrap;
+	margin-left: 4px;
+	vertical-align: middle;
+	color: var(--tool-type-color);
+	background: color-mix(in srgb, var(--tool-type-color) 20%, transparent);
+}
+
+.tool-type-badge.built-in { --tool-type-color: var(--link-color); }
+.tool-type-badge.alternative { --tool-type-color: var(--success-fg); }
+
+.tool-builtin-label {
+	opacity: 0.5;
+	font-style: italic;
+}
+
+.ratio-better { color: var(--success-fg); }
+.ratio-worse { color: var(--error-fg); }
+.ratio-neutral { color: var(--text-secondary); }

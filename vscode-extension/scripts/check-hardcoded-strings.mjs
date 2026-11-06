@@ -14,7 +14,7 @@
  * Scope:
  *   - vscode-extension/src/webview/**\/*.ts (all webview UI code)
  *   - vscode-extension/src/backend/configPanel.ts, src/backend/teamServerConfigPanel.ts, and
- *     src/loadingHtml.ts — whole files dedicated to building webview HTML outside src/webview/
+ *     src/loadingHtml.ts (repo root) — whole files dedicated to building webview HTML outside src/webview/
  *   - vscode-extension/src/extension.ts, but only inside the `getXxxHtml`-style
  *     methods that build webview HTML (`^get[A-Za-z0-9_]*Html$`) — the rest of
  *     that 13k-line file is extension-host code with its own l10n conventions
@@ -141,7 +141,7 @@ const extensionTsPath = path.join(extRoot, 'src', 'extension.ts');
 const EXTRA_FULL_SCAN_FILES = [
 	path.join(extRoot, 'src', 'backend', 'configPanel.ts'),
 	path.join(extRoot, 'src', 'backend', 'teamServerConfigPanel.ts'),
-	path.join(extRoot, 'src', 'loadingHtml.ts'),
+	path.join(repoRoot, 'src', 'loadingHtml.ts'),
 ];
 // The personalized-insights catalog (issue #2081). Unlike every other scanned
 // file this one renders no HTML at all — its user-facing strings are plain
@@ -422,8 +422,24 @@ const EXEMPT_MARKER_RE = /^(?:\/\/|\/\*)\s*i18n-exempt\b/i;
 function findExemptCommentLines(sourceFile) {
 	const lines = new Set();
 	const scanner = ts.createScanner(ts.ScriptTarget.Latest, /* skipTrivia */ false, ts.LanguageVariant.Standard, sourceFile.text);
+	// A bare scanner does not know a `}` closes a template `${` hole: it would lex the rest of the
+	// template (`...tail text`) as code and then treat the tail's closing backtick as the START of a
+	// new template, inverting code/string state for the remainder of the file — so a real
+	// `// i18n-exempt` comment after the first interpolated template was swallowed as template text.
+	// Tracking open braces and re-scanning the `}` as a template middle/tail keeps state in sync.
+	const braceIsTemplateHole = [];
 	let kind = scanner.scan();
 	while (kind !== ts.SyntaxKind.EndOfFileToken) {
+		if (kind === ts.SyntaxKind.TemplateHead) {
+			braceIsTemplateHole.push(true);
+		} else if (kind === ts.SyntaxKind.OpenBraceToken) {
+			braceIsTemplateHole.push(false);
+		} else if (kind === ts.SyntaxKind.CloseBraceToken && braceIsTemplateHole.length > 0) {
+			if (braceIsTemplateHole.pop()) {
+				kind = scanner.reScanTemplateToken(/* isTaggedTemplate */ false);
+				if (kind === ts.SyntaxKind.TemplateMiddle) { braceIsTemplateHole.push(true); }
+			}
+		}
 		if (kind === ts.SyntaxKind.SingleLineCommentTrivia || kind === ts.SyntaxKind.MultiLineCommentTrivia) {
 			if (EXEMPT_MARKER_RE.test(scanner.getTokenText())) {
 				const startLine = ts.getLineAndCharacterOfPosition(sourceFile, scanner.getTokenPos()).line;

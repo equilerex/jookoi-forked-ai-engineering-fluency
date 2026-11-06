@@ -1,8 +1,8 @@
-import type { ApplyButtonUsage, DailyModelEfficiency, DailyTokenStats, ModelUsage, UsageAnalysisPeriod } from './types';
+import type { ApplyButtonUsage, DailyModelEfficiency, DailyModelEfficiencyEntry, DailyTokenStats, ModelSessionRecord, ModelUsage, UsageAnalysisPeriod } from './types';
 import type { CacheBreakagePeriodStats } from './cacheBreakage';
 import { getModelDisplayName } from './webview/shared/modelUtils';
 import { getModelBillingProvider } from './chartDataBuilder';
-import { createEmptyDailyModelEfficiencyEntry, mergeDailyModelEfficiency } from './modelEfficiency';
+import { createEmptyDailyModelEfficiencyEntry, medianTurnSeconds, mergeDailyModelEfficiency, mergeTurnLatency, outputTokensPerSecond } from './modelEfficiency';
 
 /**
  * Efficiency analysis — pure computations behind the "Efficiency" view.
@@ -751,7 +751,7 @@ export function splitTrailingWindows(dailyStats: DailyTokenStats[], now: Date): 
 // Period delta cards
 // ---------------------------------------------------------------------------
 
-export type DeltaUnit = 'ratio' | 'percent' | 'minutes' | 'tokens' | 'currency';
+export type DeltaUnit = 'ratio' | 'percent' | 'minutes' | 'seconds' | 'tokensPerSecond' | 'tokens' | 'currency';
 
 /** One month-over-month delta card. `prev`/`cur` are null when the metric is unavailable in that period. */
 export interface EfficiencyDelta {
@@ -1091,6 +1091,27 @@ export function buildSkillUsageSeries(
 	};
 }
 
+/** One row of the Skills tab's per-skill table. */
+export interface SkillUsageRow {
+	name: string;
+	count: number;
+	description: string;
+}
+
+/** Invocations per skill across a series' buckets, with descriptions where known. */
+export function buildSkillUsageRows(
+	trends: Pick<SkillUsageTrends, 'weeks'>,
+	descriptions: Record<string, string> | undefined,
+): SkillUsageRow[] {
+	const totals = new Map<string, number>();
+	for (const week of trends.weeks) {
+		for (const [name, count] of Object.entries(week.byName)) {
+			totals.set(name, (totals.get(name) ?? 0) + count);
+		}
+	}
+	return [...totals].map(([name, count]) => ({ name, count, description: descriptions?.[name] ?? '' }));
+}
+
 /**
  * Builds the weekly agent-skill usage series for the trailing `weeksBack` weeks
  * — the view's default, unfiltered scope.
@@ -1237,6 +1258,13 @@ export function computeSkillImpact(sessions: EfficiencySessionInput[]): SkillImp
 // ---------------------------------------------------------------------------
 
 /**
+ * What the Models tab prices work with: `provider` is token counts at provider/API rates
+ * (the default); `exact` is the Copilot AIU billing the session reported. The two are
+ * never mixed — a side without exact billing renders "—" on the exact basis.
+ */
+export type ModelCostBasis = 'provider' | 'exact';
+
+/**
  * One model's efficiency profile over a time window, derived from the daily
  * per-model aggregates. Costs use provider/API rates (the basis carried by
  * `ModelEfficiencyCounters.cost`), so "cheaper per edit turn" is a statement
@@ -1255,7 +1283,12 @@ export interface ModelPeriodMetrics {
 	calls: number;
 	editTurns: number;
 	tokens: number;
+	/** Cost on the basis named by `costBasis`; 0 when that basis is unavailable for this side. */
 	cost: number;
+	/** Which cost the cost-based rows use. */
+	costBasis: ModelCostBasis;
+	/** True when every session folded into this side carries exact Copilot billing. */
+	exactCostAvailable: boolean;
 	loc: number;
 	costPerEditTurn: number | null;
 	costPerSession: number | null;
@@ -1267,18 +1300,31 @@ export interface ModelPeriodMetrics {
 	retryRate: number | null;
 	selfCorrectionRate: number | null;
 	cacheReadShare: number | null;
+	/** Input tokens per turn not served from the prompt cache; an upper bound when `cacheReadsReported` is false. */
+	freshInputTokensPerCall: number | null;
+	/** Input tokens per turn served from the prompt cache. */
+	cachedInputTokensPerCall: number | null;
+	/** True when the window carries any cache-read tokens; false means the source cannot report them. */
+	cacheReadsReported: boolean;
 	activeMinutesPerSession: number | null;
 	applyRate: number | null;
+	/** Median end-to-end turn duration (includes tool runs and approval waits); null when no turn was timed. */
+	medianTurnSeconds: number | null;
+	/** Output tokens per second over timed turns that reported output tokens; null when none did. */
+	outputTokensPerSecond: number | null;
 	/** Share of this model's tokens per task category (0..1), for confounder context. */
 	taskMix: { [category: string]: number };
 	/** True when the window carries enough sessions for the ratios to be trusted. */
 	sampleSufficient: boolean;
 	/** True when the window carries enough edit turns for the edit-based rates. */
 	editSampleSufficient: boolean;
+	/** What the mixed-model / outlier session filter did to this side. */
+	filtering: ModelFilterOutcome;
 }
 
+const FILTER_UNAVAILABLE_CAVEAT = 'This data predates per-session records, so the mixed-model and outlier filters could not be applied. Refresh the stats to enable them.';
 /** Minimum session equivalents before a model's period ratios are trusted. */
-const MIN_SESSION_SHARE_FOR_COMPARE = 5;
+export const MIN_SESSION_SHARE_FOR_COMPARE = 5;
 /** Minimum edit turns before a model's edit-based rates are trusted. */
 const MIN_EDIT_TURNS_FOR_COMPARE = 10;
 /** Task-mix divergence (in share points) above which a confounder caveat is raised. */
@@ -1412,20 +1458,150 @@ function gatedRatio(numerator: number, denominator: number, gate = true): number
  * Aggregates one model's daily efficiency entries across `days` into a single
  * comparable profile. Returns null when the model never appears in the window.
  */
-export function computeModelPeriodMetrics(days: ModelDailyInput[], model: string, periodLabel: string): ModelPeriodMetrics | null {
-	const totals = createEmptyDailyModelEfficiencyEntry();
+export function computeModelPeriodMetrics(
+	days: ModelDailyInput[],
+	model: string,
+	periodLabel: string,
+	filter: ModelSessionFilter = UNFILTERED_MODEL_SESSIONS,
+	/** Pooled outlier cutoff from {@link computeOutlierCutoffTokens}; sessions above it are excluded. */
+	outlierCutoffTokens: number | null = null,
+	costBasis: ModelCostBasis = 'provider',
+): ModelPeriodMetrics | null {
+	const entries = days.map(day => day.modelEfficiency?.[model]);
+	if (!entries.some(Boolean)) { return null; }
 	const taskMixRaw = new Map<string, number>();
-	let seen = false;
-	for (const day of days) {
-		const entry = day.modelEfficiency?.[model];
-		if (!entry) { continue; }
-		seen = true;
-		mergeDailyModelEfficiency({ [model]: totals }, { [model]: entry });
-		accumulateTaskMix(day, model, taskMixRaw);
-	}
-	if (!seen) { return null; }
+	for (const day of days) { accumulateTaskMix(day, model, taskMixRaw); }
 
+	const hasRecords = entries.some(entry => entry?.sessionRecords?.length);
+	const needsRecords = !filter.includeMixedSessions || outlierCutoffTokens !== null;
+	const filtering: ModelFilterOutcome = { applied: needsRecords && hasRecords, unavailable: needsRecords && !hasRecords, excludedMixed: 0, excludedOutliers: 0 };
+	const totals = filtering.applied
+		? totalsFromSessionRecords(entries, filter, outlierCutoffTokens, filtering)
+		: totalsFromDayAggregates(model, entries);
+	return finishPeriodMetrics(model, periodLabel, totals, taskMixRaw, filtering, costBasis);
+}
+
+function totalsFromDayAggregates(model: string, entries: (DailyModelEfficiencyEntry | undefined)[]): DailyModelEfficiencyEntry {
+	const totals = createEmptyDailyModelEfficiencyEntry();
+	for (const entry of entries) {
+		if (entry) { mergeDailyModelEfficiency({ [model]: totals }, { [model]: entry }); }
+	}
+	return totals;
+}
+
+/** Sums the sessions that survive the filter, counting what it dropped into `outcome`. */
+function totalsFromSessionRecords(
+	entries: (DailyModelEfficiencyEntry | undefined)[],
+	filter: ModelSessionFilter,
+	outlierCutoffTokens: number | null,
+	outcome: ModelFilterOutcome,
+): DailyModelEfficiencyEntry {
+	const totals = createEmptyDailyModelEfficiencyEntry();
+	for (const rec of entries.flatMap(entry => entry?.sessionRecords ?? [])) {
+		if (rec.mixed && !filter.includeMixedSessions) { outcome.excludedMixed++; }
+		else if (outlierCutoffTokens !== null && rec.inputTokens + rec.outputTokens > outlierCutoffTokens) { outcome.excludedOutliers++; }
+		else { addSessionRecord(totals, rec); }
+	}
+	return totals;
+}
+
+function addSessionRecord(totals: DailyModelEfficiencyEntry, rec: ModelSessionRecord): void {
+	totals.sessions += 1;
+	totals.sessionShare += rec.share;
+	totals.calls += rec.calls;
+	totals.editTurns += rec.editTurns;
+	totals.oneShotEditTurns += rec.oneShotEditTurns;
+	totals.retries += rec.retries;
+	totals.selfCorrections += rec.selfCorrections;
+	totals.inputTokens += rec.inputTokens;
+	totals.outputTokens += rec.outputTokens;
+	totals.cachedReadTokens += rec.cachedReadTokens;
+	totals.cost += rec.cost;
+	if (rec.exactCost !== undefined) {
+		totals.exactCost = (totals.exactCost ?? 0) + rec.exactCost;
+		totals.exactCostSessions = (totals.exactCostSessions ?? 0) + 1;
+	}
+	totals.linesAdded += rec.loc;
+	totals.applies += rec.applies;
+	totals.codeBlocks += rec.codeBlocks;
+	if (rec.activeDurationMs > 0) {
+		totals.activeDurationMs += rec.activeDurationMs;
+		totals.durationSessionShare += rec.share;
+	}
+	mergeTurnLatency(totals, rec);
+}
+
+/**
+ * Which sessions the Models tab compares. Default: single-model sessions only,
+ * with the heaviest 5% (by tokens, pooled across both sides) trimmed so a few
+ * runaway sessions do not decide the verdict.
+ */
+export interface ModelSessionFilter {
+	/** Keep sessions that mixed several models (their duration/LOC are token-share splits). */
+	includeMixedSessions: boolean;
+	/** Drop sessions above this percentile of session tokens. */
+	outlierTrim: 'none' | 'p95' | 'p90';
+}
+
+export const DEFAULT_MODEL_SESSION_FILTER: ModelSessionFilter = { includeMixedSessions: false, outlierTrim: 'p95' };
+/** No narrowing: the day aggregates are used as they are. */
+export const UNFILTERED_MODEL_SESSIONS: ModelSessionFilter = { includeMixedSessions: true, outlierTrim: 'none' };
+
+/** Minimum sessions before an outlier cutoff is computed: trimming a handful of sessions is just deleting data. */
+const MIN_SESSIONS_FOR_OUTLIER_TRIM = 20;
+
+/** What the session filter did to one side's data. */
+export interface ModelFilterOutcome {
+	/** True when per-session records were used to narrow the data. */
+	applied: boolean;
+	/** True when a filter was requested but the data carries no per-session records. */
+	unavailable: boolean;
+	excludedMixed: number;
+	excludedOutliers: number;
+}
+
+/**
+ * The session-token cutoff above which sessions count as outliers, pooled across
+ * every side being compared so both are trimmed by the same yardstick. Null when
+ * trimming is off or there are too few sessions to trim meaningfully.
+ */
+export function computeOutlierCutoffTokens(
+	groups: { days: ModelDailyInput[]; model: string }[],
+	filter: ModelSessionFilter,
+): number | null {
+	if (filter.outlierTrim === 'none') { return null; }
+	const tokens: number[] = [];
+	for (const { days, model } of groups) {
+		for (const day of days) {
+			for (const rec of day.modelEfficiency?.[model]?.sessionRecords ?? []) {
+				if (rec.mixed && !filter.includeMixedSessions) { continue; }
+				tokens.push(rec.inputTokens + rec.outputTokens);
+			}
+		}
+	}
+	if (tokens.length < MIN_SESSIONS_FOR_OUTLIER_TRIM) { return null; }
+	tokens.sort((x, y) => x - y);
+	const q = filter.outlierTrim === 'p90' ? 0.9 : 0.95;
+	const pos = (tokens.length - 1) * q;
+	const lo = Math.floor(pos);
+	const hi = Math.ceil(pos);
+	return tokens[lo] + (tokens[hi] - tokens[lo]) * (pos - lo);
+}
+
+function finishPeriodMetrics(
+	model: string,
+	periodLabel: string,
+	totals: DailyModelEfficiencyEntry,
+	taskMixRaw: Map<string, number>,
+	filtering: ModelFilterOutcome,
+	costBasis: ModelCostBasis,
+): ModelPeriodMetrics {
 	const tokens = totals.inputTokens + totals.outputTokens;
+	// Exact billing counts only when it covers every session on this side; a partial figure
+	// would understate the cost, and mixing it with estimates would compare two bases.
+	const exactCostAvailable = totals.sessions > 0 && (totals.exactCostSessions ?? 0) >= totals.sessions;
+	const costUsable = costBasis === 'provider' || exactCostAvailable;
+	const cost = costBasis === 'exact' ? (exactCostAvailable ? totals.exactCost ?? 0 : 0) : totals.cost;
 	const loc = totals.linesAdded + totals.linesRemoved;
 	const enoughSessions = totals.sessionShare >= MIN_SESSION_SHARE_FOR_COMPARE;
 	const enoughEdits = totals.editTurns >= MIN_EDIT_TURNS_FOR_COMPARE;
@@ -1439,12 +1615,14 @@ export function computeModelPeriodMetrics(days: ModelDailyInput[], model: string
 		calls: totals.calls,
 		editTurns: totals.editTurns,
 		tokens,
-		cost: totals.cost,
+		cost,
+		costBasis,
+		exactCostAvailable,
 		loc,
-		costPerEditTurn: gatedRatio(totals.cost, totals.editTurns, enoughEdits),
-		costPerSession: gatedRatio(totals.cost, totals.sessionShare, enoughSessions),
-		costPerKloc: gatedRatio(totals.cost * 1000, loc, enoughSessions),
-		dollarsPerMTokens: gatedRatio(totals.cost * 1_000_000, tokens),
+		costPerEditTurn: gatedRatio(cost, totals.editTurns, enoughEdits && costUsable),
+		costPerSession: gatedRatio(cost, totals.sessionShare, enoughSessions && costUsable),
+		costPerKloc: gatedRatio(cost * 1000, loc, enoughSessions && costUsable),
+		dollarsPerMTokens: gatedRatio(cost * 1_000_000, tokens, costUsable),
 		tokensPerEditTurn: gatedRatio(tokens, totals.editTurns, enoughEdits),
 		tokensPerSession: gatedRatio(tokens, totals.sessionShare, enoughSessions),
 		oneShotRate: gatedRatio(totals.oneShotEditTurns, totals.editTurns, enoughEdits),
@@ -1452,11 +1630,17 @@ export function computeModelPeriodMetrics(days: ModelDailyInput[], model: string
 		selfCorrectionRate: gatedRatio(totals.selfCorrections, totals.editTurns, enoughEdits),
 		// Capped at 1.0: some providers report cachedReadTokens > inputTokens.
 		cacheReadShare: capShare(gatedRatio(totals.cachedReadTokens, totals.inputTokens)),
+		freshInputTokensPerCall: gatedRatio(totals.inputTokens - Math.min(totals.cachedReadTokens, totals.inputTokens), totals.calls),
+		cachedInputTokensPerCall: gatedRatio(Math.min(totals.cachedReadTokens, totals.inputTokens), totals.calls),
+		cacheReadsReported: totals.cachedReadTokens > 0,
 		activeMinutesPerSession: gatedRatio(totals.activeDurationMs / 60_000, totals.durationSessionShare),
 		applyRate: gatedRatio(totals.applies, totals.codeBlocks),
+		medianTurnSeconds: medianTurnSeconds(totals),
+		outputTokensPerSecond: outputTokensPerSecond(totals),
 		taskMix: normalizeMix(taskMixRaw),
 		sampleSufficient: enoughSessions,
 		editSampleSufficient: enoughEdits,
+		filtering,
 	};
 }
 
@@ -1612,7 +1796,7 @@ export function windowHasModelData(days: ModelDailyInput[], window: ModelCompare
 }
 
 /** Which two sides the Models tab is comparing. */
-export type ModelCompareMode = 'models' | 'periods';
+export type ModelCompareMode = 'models' | 'periods' | 'harnesses';
 
 /** The Models tab's current picker state, in the shape the webview keeps it. */
 export interface ModelCompareSelection {
@@ -1625,6 +1809,52 @@ export interface ModelCompareSelection {
 	windowA: ModelCompareWindowId;
 	/** The compared-with window, used by `periods` mode. */
 	windowB: ModelCompareWindowId;
+	/** Harness (editor label) of side A, used by `harnesses` mode. */
+	editorA?: string;
+	/** Harness (editor label) of side B, used by `harnesses` mode. */
+	editorB?: string;
+}
+
+/**
+ * Harnesses (editor labels) that have per-model data in `days`, most-used
+ * first (by token volume), then alphabetically. Rows without an editor are
+ * unattributed and never offered as a harness.
+ */
+export function listModelHarnesses(days: ModelDailyInput[]): string[] {
+	const tokens = new Map<string, number>();
+	for (const day of days) {
+		if (!day.editor || !day.modelEfficiency) { continue; }
+		let total = tokens.get(day.editor) ?? 0;
+		for (const e of Object.values(day.modelEfficiency)) { total += e.inputTokens + e.outputTokens; }
+		tokens.set(day.editor, total);
+	}
+	return [...tokens.keys()].sort((a, b) => (tokens.get(b) ?? 0) - (tokens.get(a) ?? 0) || a.localeCompare(b));
+}
+
+/**
+ * "One model, two harnesses": the same model's profile in `editorA` against
+ * `editorB` over one window. Each side is the model's exact per-editor rows
+ * (rows with no editor are excluded from both), and the result goes through
+ * {@link compareModels}, so the same sample floors and noise gate apply.
+ * `periodLabel` carries the harness name so the table and verdict read
+ * "<model> (<harness>)". Returns null when either side has no data.
+ */
+export function compareModelAcrossHarnesses(
+	days: ModelDailyInput[],
+	model: string,
+	editorA: string,
+	editorB: string,
+	window: ModelCompareWindow,
+	filter: ModelSessionFilter = UNFILTERED_MODEL_SESSIONS,
+	costBasis: ModelCostBasis = 'provider',
+): ModelComparison | null {
+	const inWindow = selectDaysInWindow(days, window);
+	const daysA = selectModelDaysForEditor(inWindow, editorA);
+	const daysB = selectModelDaysForEditor(inWindow, editorB);
+	const cutoff = computeOutlierCutoffTokens([{ days: daysA, model }, { days: daysB, model }], filter);
+	const a = computeModelPeriodMetrics(daysA, model, editorA, filter, cutoff, costBasis);
+	const b = computeModelPeriodMetrics(daysB, model, editorB, filter, cutoff, costBasis);
+	return a && b ? compareModels(a, b) : null;
 }
 
 /** The models that appear at all in `days` — key presence only, no aggregation. */
@@ -1660,11 +1890,27 @@ export function listEligibleModels(
 	return filterModelsByVendor(listWindowEligibleModels(days, selection, now), vendor);
 }
 
+/** The window's rows narrowed to the two harnesses of a `harnesses` selection. */
+function harnessSideDays(days: ModelDailyInput[], selection: ModelCompareSelection, now: Date): { daysA: ModelDailyInput[]; daysB: ModelDailyInput[] } {
+	const inWindow = selectDaysInWindow(days, resolveModelCompareWindow(selection.window, now));
+	return {
+		daysA: selection.editorA ? selectModelDaysForEditor(inWindow, selection.editorA) : [],
+		daysB: selection.editorB ? selectModelDaysForEditor(inWindow, selection.editorB) : [],
+	};
+}
+
 function listWindowEligibleModels(
 	days: ModelDailyInput[],
 	selection: ModelCompareSelection,
 	now: Date,
 ): ComparableModel[] {
+	if (selection.mode === 'harnesses') {
+		// Only models used in both harnesses have a second side to compare against.
+		const { daysA, daysB } = harnessSideDays(days, selection, now);
+		const inA = modelsPresent(daysA);
+		const inB = modelsPresent(daysB);
+		return listComparableModels(uniqueDays(daysA, daysB)).filter(m => inA.has(m.model) && inB.has(m.model));
+	}
 	if (selection.mode === 'periods') {
 		const daysA = selectDaysInWindow(days, resolveModelCompareWindow(selection.windowA, now));
 		const daysB = selectDaysInWindow(days, resolveModelCompareWindow(selection.windowB, now));
@@ -1694,6 +1940,7 @@ export function reconcileModelSelection(
 	now: Date,
 	vendor?: string,
 ): ModelCompareSelection {
+	if (selection.mode === 'harnesses') { selection = reconcileHarnessEditors(days, selection, now); }
 	const eligible = listEligibleModels(days, selection, now, vendor);
 	const eligibleIds = new Set(eligible.map(m => m.model));
 	// Defaults come off this pool: every model that clears the sample floor
@@ -1710,14 +1957,46 @@ export function reconcileModelSelection(
 	const modelA = eligibleIds.has(selection.modelA) ? selection.modelA : (firstOther(heldB) || firstOther());
 	// `periods` mode compares one model against itself across two windows, so it
 	// leaves Model B untouched — it is reconciled again on the way back to `models`.
-	if (selection.mode === 'periods') { return { ...selection, modelA }; }
+	// `harnesses` mode likewise compares one model, so Model B is left alone.
+	if (selection.mode !== 'models') { return { ...selection, modelA }; }
 	const keepB = eligibleIds.has(selection.modelB) && selection.modelB !== modelA;
 	return { ...selection, modelA, modelB: keepB ? selection.modelB : firstOther(modelA) };
 }
 
+/** Picks a harness pair: `held` keeps its slot, its partner prefers a shared model; with no held side the first model-sharing pair wins. */
+function pickHarnessPair(
+	harnesses: string[],
+	sharesModel: (x: string, y: string) => boolean,
+	held?: { editor: string; slot: 'a' | 'b' },
+): [string, string] | undefined {
+	const partnerFor = (x: string): string | undefined => harnesses.find(h => h !== x && sharesModel(x, h)) ?? harnesses.find(h => h !== x);
+	const first = held?.editor ?? harnesses.find(x => harnesses.some(h => h !== x && sharesModel(x, h))) ?? harnesses[0];
+	const second = first === undefined ? undefined : partnerFor(first);
+	if (first === undefined || second === undefined) { return undefined; }
+	return held?.slot === 'b' ? [second, first] : [first, second];
+}
+
+/**
+ * Keeps the two harness pickers on distinct harnesses that have data in the
+ * window. A stale or missing pick is replaced by the first pair (most-used
+ * first) that shares a model, falling back to the two most-used harnesses.
+ */
+function reconcileHarnessEditors(days: ModelDailyInput[], selection: ModelCompareSelection, now: Date): ModelCompareSelection {
+	const inWindow = selectDaysInWindow(days, resolveModelCompareWindow(selection.window, now));
+	const harnesses = listModelHarnesses(inWindow);
+	const valid = (e?: string): e is string => !!e && harnesses.includes(e);
+	if (valid(selection.editorA) && valid(selection.editorB) && selection.editorA !== selection.editorB) { return selection; }
+	const modelsOf = (editor: string): Set<string> => modelsPresent(selectModelDaysForEditor(inWindow, editor));
+	const sharesModel = (x: string, y: string): boolean => { const mx = modelsOf(x); return [...modelsOf(y)].some(m => mx.has(m)); };
+	const held = valid(selection.editorA) ? { editor: selection.editorA, slot: 'a' as const }
+		: valid(selection.editorB) ? { editor: selection.editorB, slot: 'b' as const } : undefined;
+	const pair = pickHarnessPair(harnesses, sharesModel, held);
+	return pair ? { ...selection, editorA: pair[0], editorB: pair[1] } : { ...selection, editorA: '', editorB: '' };
+}
+
 export type ModelComparisonMetricId =	| 'cost-per-edit-turn' | 'cost-per-session' | 'cost-per-kloc' | 'dollars-per-mtokens'
 	| 'tokens-per-edit-turn' | 'tokens-per-session' | 'one-shot-rate' | 'retry-rate'
-	| 'self-correction-rate' | 'cache-read-share' | 'active-minutes-per-session' | 'apply-rate';
+	| 'self-correction-rate' | 'cache-read-share' | 'fresh-input-per-call' | 'cached-input-per-call' | 'active-minutes-per-session' | 'median-turn-seconds' | 'output-tokens-per-second' | 'apply-rate';
 
 /** One metric compared head-to-head between two sides. */
 export interface ModelComparisonRow {
@@ -1794,6 +2073,9 @@ function taskMixDivergence(a: { [c: string]: number }, b: { [c: string]: number 
 function buildCaveats(a: ModelPeriodMetrics, b: ModelPeriodMetrics): string[] {
 	const caveats: string[] = [];
 	for (const side of [a, b]) {
+		if (side.costBasis === 'exact' && !side.exactCostAvailable) {
+			caveats.push(`${side.displayName} (${side.periodLabel}) has no exact Copilot billing for all of its sessions, so its cost rows show “—” on the exact-billing basis rather than mixing in estimates.`);
+		}
 		if (!side.sampleSufficient) {
 			caveats.push(`${side.displayName} (${side.periodLabel}) has only ${side.sessionShare.toFixed(1)} session equivalents — below the ${MIN_SESSION_SHARE_FOR_COMPARE} needed for reliable per-session ratios.`);
 		}
@@ -1805,6 +2087,11 @@ function buildCaveats(a: ModelPeriodMetrics, b: ModelPeriodMetrics): string[] {
 	if (divergence >= TASK_MIX_DIVERGENCE_THRESHOLD) {
 		caveats.push(`The two sides did different kinds of work (${Math.round(divergence * 100)}% task-mix difference), so part of the gap may reflect the tasks rather than the models.`);
 	}
+	const blind = [a, b].filter(side => !side.cacheReadsReported && side.calls > 0);
+	if (blind.length > 0) {
+		caveats.push(`${blind.map(side => `${side.displayName} (${side.periodLabel})`).join(' and ')} reported no prompt-cache reads, so its fresh input tokens are an upper bound: any cached context is counted as fresh.`);
+	}
+	if (a.filtering.unavailable || b.filtering.unavailable) { caveats.push(FILTER_UNAVAILABLE_CAVEAT); }
 	if (a.sessions > a.sessionShare * 1.5 || b.sessions > b.sessionShare * 1.5) {
 		caveats.push('Much of this usage comes from sessions that mixed several models; duration and lines-of-code are split by token share and are therefore approximate.');
 	}
@@ -1833,7 +2120,7 @@ export function compareModels(a: ModelPeriodMetrics, b: ModelPeriodMetrics): Mod
 			'What one round of file edits actually costs. The headline efficiency number.',
 			a.costPerEditTurn, b.costPerEditTurn, 'currency', 'down'),
 		comparisonRow('cost-per-session', 'Cost per session',
-			'Average spend per session, at provider rates.',
+			a.costBasis === 'exact' ? 'Average spend per session, at exact Copilot billing.' : 'Average spend per session, at provider rates.',
 			a.costPerSession, b.costPerSession, 'currency', 'down'),
 		comparisonRow('cost-per-kloc', 'Cost per 1000 lines changed',
 			'Spend per unit of code actually shipped.',
@@ -1859,9 +2146,21 @@ export function compareModels(a: ModelPeriodMetrics, b: ModelPeriodMetrics): Mod
 		comparisonRow('cache-read-share', 'Cache read share',
 			'Share of input tokens served from the prompt cache. Higher is cheaper.',
 			a.cacheReadShare, b.cacheReadShare, 'percent', 'up'),
+		comparisonRow('fresh-input-per-call', 'Fresh input tokens per turn',
+			'Input tokens per turn that were not served from the prompt cache, so harnesses that count cache reads inside input compare on the same basis. Lower is better.',
+			a.freshInputTokensPerCall, b.freshInputTokensPerCall, 'tokens', 'down'),
+		comparisonRow('cached-input-per-call', 'Cached input tokens per turn',
+			'Context re-read from the prompt cache each turn. Context, not cost: cache reads are cheap.',
+			a.cachedInputTokensPerCall, b.cachedInputTokensPerCall, 'tokens', 'up'),
 		comparisonRow('active-minutes-per-session', 'Active minutes per session',
 			'Net working time per session, excluding idle gaps.',
 			a.activeMinutesPerSession, b.activeMinutesPerSession, 'minutes', 'down'),
+		comparisonRow('median-turn-seconds', 'Median turn time',
+			'Median end-to-end time per turn, including tool runs and approval waits. Not model latency.',
+			a.medianTurnSeconds, b.medianTurnSeconds, 'seconds', 'down'),
+		comparisonRow('output-tokens-per-second', 'Output tokens per second',
+			'Output tokens divided by turn time, over turns that reported output tokens. Includes tool waits, so it understates raw decode speed.',
+			a.outputTokensPerSecond, b.outputTokensPerSecond, 'tokensPerSecond', 'up'),
 		comparisonRow('apply-rate', 'Apply rate',
 			'Share of suggested code blocks actually applied — does the output stick?',
 			a.applyRate, b.applyRate, 'percent', 'up'),
@@ -1897,6 +2196,10 @@ export interface EfficiencyViewData {
 	skillImpact: SkillImpact[];
 	/** True when any skill invocation was detected in the trend window. */
 	hasSkills: boolean;
+	/** Skill name -> description, for the Skills tab's per-skill table. */
+	skillDescriptions: Record<string, string>;
+	/** True when this host can scan debug logs for time to first token; the TTFT tab is hidden otherwise. */
+	ttftAvailable: boolean;
 	/**
 	 * Trimmed per-day, per-model efficiency data backing the Models tab. The tab
 	 * recomputes comparisons client-side from this so switching models or windows

@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Analyze coverage of vscode-extension/src/toolFamilies.ts (DEFAULT_TOOL_FAMILIES)
+ * Analyze coverage of src/toolFamilies.ts (DEFAULT_TOOL_FAMILIES)
  * against the canonical tool-name list in src/toolNames.json, and optionally
  * against a live/adhoc list of tool names (e.g. the current agent's own tool list).
  *
@@ -10,7 +10,7 @@
  * before the match, so every editor-specific spelling of "read a file",
  * "search text", "run a shell command", etc. needs to be listed explicitly
  * in the family it belongs to, or it silently falls into the "Other Tools"
- * bucket in the Tool Output Token Analysis tab.
+ * bucket in the Output tokens by tool family tab.
  *
  * This script finds tool names that exist in toolNames.json (or were passed
  * in via --tools) but are not yet listed in any family's builtIn/alternatives
@@ -35,7 +35,7 @@ const path = require('path');
 
 const REPO_ROOT = path.resolve(__dirname, '..', '..', '..');
 const TOOL_NAMES_JSON = path.join(REPO_ROOT, 'src', 'toolNames.json');
-const TOOL_FAMILIES_TS = path.join(REPO_ROOT, 'vscode-extension', 'src', 'toolFamilies.ts');
+const TOOL_FAMILIES_TS = path.join(REPO_ROOT, 'src', 'toolFamilies.ts');
 
 function fail(message) {
   console.error(`ERROR: ${message}`);

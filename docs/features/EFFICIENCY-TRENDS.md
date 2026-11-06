@@ -18,18 +18,56 @@ Above the scoped charts sits one compact toolbar:
 | **Resolution** | Auto, Daily, Weekly, Monthly — only the widths the range can honestly carry are offered |
 | **Editor** | Narrows to one editor/agent (VS Code, Claude Code, …) |
 | **Model vendor** | *Models tab only.* Narrows which models the A/B pickers offer |
-| **Drill** | Jumps into the days behind one week or month, with a chip and a **Back** action |
+| **Drill chip** | While zoomed into the days behind one week or month: the range and a **Back** action |
 
 Every control is a real `<button>` or `<select>` with a label, so the toolbar is
 keyboard reachable; a live region under it announces the resulting scope
-("Showing Last 12 weeks, weekly buckets, all editors") after each change. The
-`Drill into…` picker is the keyboard equivalent of clicking a data point — a
-`<canvas>` is not focusable and its points are not in the accessibility tree,
-so without it the drill-down would be mouse-only.
+("Showing Last 12 weeks, weekly buckets, all editors") after each change.
+
+On **Models** the toolbar is split so each control sits beside what it drives.
+The editor and vendor filters stay above the head-to-head and the drift chart,
+because they narrow both; the time presets, resolution and drill chip move into
+the drift section, because the head-to-head never reads them. In harness mode the
+Editor filter is hidden, because that mode picks its own two editors.
 
 The whole scope (preset, resolution, editor, vendor, drill stack) is persisted
 through the webview state API, so reopening the panel lands you where you left.
 A state blob written before this feature existed simply reads as the defaults.
+
+## Selected-period detail
+
+Trends, Combined, Skills and Models share one drill-down. Clicking a chart point
+**selects** that bucket; the labelled **Selected period** `<select>` does the
+same for keyboard and screen-reader users (a `<canvas>` point is not in the
+accessibility tree). On every tab, the picker and its region sit directly above the
+chart they select from (on Models, the drift chart), and a chart click scrolls the
+region into view. The region is `role="region"` with `aria-live="polite"` and shows:
+
+- the date range, with an *in progress* marker while the bucket is still filling;
+- raw sessions, tokens, turns, lines changed and estimated cost;
+- each ratio for the bucket and for the preceding bucket of the same width, with
+  the change spelled out in words ("down 40% (better)") — never colour or an arrow alone;
+- a reason beside every unavailable ratio (no sessions, no LOC data, too few edit turns).
+  Unavailable is `null` and shown as "—", never zero.
+
+On **Skills** it adds invocations, sessions using a skill, the tracked-session
+denominator and the share change in points. On **Models** it shows each selected
+model's profile for the bucket, hides ratios below the session-equivalent floor, and
+keeps the task-mix, mixed-model (session signals split by token share) and
+observational caveats. "Show the days in this period" is the explicit way to drill
+into days; a click alone no longer rewrites the range. The selection is paired with
+its resolution, so a key from one bucket width never selects a different bucket at
+another. The payload is built in `src/efficiencyBucketDetail.ts` from the series the
+charts already draw, so the detail can never disagree with its point; it carries
+codes, and the webview resolves the prose through localization.
+
+Contextual navigation: Month vs Month cards that have a weekly trend (tokens, turns,
+active minutes, retry and apply rate) get a **View trend** button that focuses that
+chart; Cost Attribution model-mix rows get **View in Models**, which opens the
+concrete model's drift chart. Neither filters the card's own population.
+
+The 6-month and 1-year presets cover the issue's 26- and 52-week horizons, so no
+separate week-count presets exist.
 
 ## Ranges, buckets and partial periods
 
@@ -109,7 +147,7 @@ support is worse than no filter, because it produces a confident wrong number.
 | **Trends** | Time/resolution, Editor | Editor is meaningful for every workflow ratio. No vendor/model filter: blended ratios confound task mix with the provider-versus-Copilot cost basis |
 | **Combined** | Time/resolution, Editor | Lets output validate shorter/cheaper sessions within one environment |
 | **Models** | Time/resolution, Model A/B, model vendor, Editor | Vendor narrows the eligible models without silently aggregating unlike ones; editor conditions the comparison on an environment |
-| **Tools & Skills** | Time/resolution, Editor | Skills are invoked in a particular agent/editor. Model vendor is not a reliable causal dimension here |
+| **Skills** | Time/resolution, Editor | Skills are invoked in a particular agent/editor. Model vendor is not a reliable causal dimension here |
 | **Cost Attribution** | Time pair only | Its purpose is to explain a *whole population's* model-mix cost change. A mixed-model session appears in several categorical groups at once, which would double-count the volume term |
 | **Month vs Month** | Existing adjacent calendar periods | Its detailed metrics are global; a filter could not produce exact duration/retry/apply values |
 | **Value** | None (global 30-day context) | PR outcomes are not currently attributable to a session, editor or model |

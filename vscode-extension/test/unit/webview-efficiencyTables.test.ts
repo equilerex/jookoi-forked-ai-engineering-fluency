@@ -6,10 +6,13 @@ import { resetDataTableState, setDataTableState } from '../../src/webview/shared
 import { setFormatLocale } from '../../src/webview/shared/formatUtils';
 import { initializeWebviewLocalization } from '../../src/webview/shared/localization';
 import {
+	fmtValue,
 	MODEL_COMPARE_TABLE_ID,
 	renderModelComparisonTable,
 	renderSkillImpactTable,
+	renderSkillUsageTable,
 	skillImpactTableId,
+	SKILL_USAGE_TABLE_ID,
 } from '../../src/webview/efficiency/efficiencyTables';
 
 setFormatLocale('en-US');
@@ -104,8 +107,8 @@ test('skill impact table: escapes a hostile skill name', () => {
 test('model comparison table: escapes side names in the sub-labelled headers', () => {
 	const html = renderModelComparisonTable(comparison(), 'Compare two models');
 	assert.match(html, /<table class="data-table" aria-label="Compare two models">/);
-	assert.match(html, /A · GPT-4o<span class="th-sub">Last 30 days<\/span>/);
-	assert.match(html, /B · &lt;b&gt;evil&lt;\/b&gt;<span class="th-sub">Jan 1 – Jan 31<\/span>/);
+	assert.match(html, /<span class="model-th-tag model-th-a">A · GPT-4o<\/span><span class="th-sub">Last 30 days<\/span>/);
+	assert.match(html, /<span class="model-th-tag model-th-b">B · &lt;b&gt;evil&lt;\/b&gt;<\/span><span class="th-sub">Jan 1 – Jan 31<\/span>/);
 	assert.doesNotMatch(html, /<b>evil/);
 	assert.equal((html.match(/scope="col"/g) ?? []).length, 5);
 	assert.doesNotMatch(html, /data-table-pager|data-table-summary/);
@@ -119,8 +122,8 @@ test('model comparison table: keeps tooltips, muted rows, delta colours and winn
 	assert.match(html, /<span class="delta-change good">↓ 33%<\/span>/);
 	assert.match(html, /<span class="delta-change bad">↑ 50%<\/span>/);
 	assert.match(html, /<span class="delta-change flat">↑ 2%<\/span>/);
-	assert.match(html, /<span class="model-win-chip">B<\/span>/);
-	assert.match(html, /<span class="model-win-chip">A<\/span>/);
+	assert.match(html, /<span class="model-win-chip model-win-b">B<\/span>/);
+	assert.match(html, /<span class="model-win-chip model-win-a">A<\/span>/);
 	assert.match(html, /<span class="model-win-chip tie">tie<\/span>/);
 	assert.match(html, />—</);
 });
@@ -137,4 +140,23 @@ test('model comparison table: keeps the analytics order by default and sorts by 
 	} finally {
 		resetDataTableState(MODEL_COMPARE_TABLE_ID);
 	}
+});
+
+test('fmtValue: turn latency units render with their suffix, null as an em dash', () => {
+	assert.equal(fmtValue(12.34, 'seconds'), '12.3 s');
+	assert.equal(fmtValue(41.26, 'tokensPerSecond'), '41.3 tok/s');
+	assert.equal(fmtValue(null, 'seconds'), '—');
+	assert.equal(fmtValue(null, 'tokensPerSecond'), '—');
+});
+
+test('skill usage table: most invoked first, description cell escaped, a dash when unknown', () => {
+	resetDataTableState(SKILL_USAGE_TABLE_ID);
+	const html = renderSkillUsageTable([
+		{ name: 'alpha', count: 1, description: '' },
+		{ name: 'beta', count: 5, description: 'Does <b>beta</b>' },
+	]);
+	assert.ok(html.indexOf('beta') < html.indexOf('alpha'));
+	assert.ok(html.includes('Does &lt;b&gt;beta&lt;/b&gt;'));
+	assert.ok(!html.includes('<b>beta'));
+	assert.ok(html.includes('—'));
 });

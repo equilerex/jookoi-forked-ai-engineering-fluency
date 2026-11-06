@@ -1,6 +1,7 @@
 /// <reference path="../../src/types/jsdom.d.ts" />
 import test from 'node:test';
 import * as assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import * as path from 'node:path';
 import * as esbuild from 'esbuild';
 import { JSDOM } from 'jsdom';
@@ -170,6 +171,14 @@ function buildStatsWithInsights(): Record<string, unknown> {
 	return stats;
 }
 
+/** Polls until `condition` holds (or `timeoutMs` passes) instead of sleeping a guessed duration. */
+async function waitFor(condition: () => boolean, timeoutMs = 10_000): Promise<void> {
+	const deadline = Date.now() + timeoutMs;
+	while (!condition() && Date.now() < deadline) {
+		await new Promise((resolve) => setTimeout(resolve, 20));
+	}
+}
+
 interface Harness {
 	window: any;
 	posted: any[];
@@ -275,6 +284,131 @@ function repoPrPayload(): Record<string, unknown> {
 		],
 	};
 }
+
+test('the tool family section renders in the Tools tab and its link opens the setting', async () => {
+	const stats = buildStats() as any;
+	stats.toolFamilies = [{ id: 'reading', name: 'File Reading', builtIn: ['read_file'], alternatives: [] }];
+	stats.last30Days = {
+		...stats.last30Days,
+		toolCalls: { total: 4, byTool: { read_file: 4 }, completedByTool: { read_file: 2 }, outputTokensByTool: { read_file: 1000 } },
+	};
+	const harness = await bootWebview(stats);
+	const doc = harness.window.document;
+
+	const section = doc.querySelector('#tab-panel-tools #section-tool-families');
+	assert.ok(section, 'the section belongs to the Tools tab');
+	assert.match(section.textContent, /File Reading/);
+	const row = section.querySelector('tbody tr');
+	assert.equal(row.children[1].textContent.trim(), '2', 'completed calls, not the 4 starts');
+	assert.equal(row.children[3].textContent.trim(), '500', '1,000 tokens over 2 completed calls');
+
+	doc.getElementById('btn-open-tool-families-settings').click();
+	assert.ok(harness.posted.some((m) => m.command === 'openToolFamiliesSettings'), 'the link posts its message');
+});
+
+test('Tool Curation renders on Workspace Health and Skill Suggestions on Insights, neither under Tools & Integrations', async () => {
+	// The visual-diff fixture carries real curation and repeated-task payloads, which the sanitizers require.
+	const fixture = JSON.parse(readFileSync(path.join(EXT_ROOT, '..', '.github', 'skills', 'visual-view-diff', 'fixtures', 'usage.json'), 'utf8'));
+	const harness = await bootWebview(fixture);
+	const doc = harness.window.document;
+
+	assert.ok(doc.querySelector('#tab-panel-health #section-tool-curation'), 'Tool Curation belongs to Workspace Health');
+	assert.ok(doc.querySelector('#tab-panel-insights #section-skill-suggestions'), 'Skill Suggestions belongs to Insights');
+	assert.ok(doc.querySelector('#tab-panel-tools #section-tool-usage'), 'telemetry stays on Tools & Integrations');
+	for (const id of ['section-tool-curation', 'section-skill-suggestions']) {
+		assert.equal(doc.querySelector(`#tab-panel-tools #${id}`), null, `${id} must not render under Tools & Integrations`);
+		assert.equal(doc.querySelectorAll(`#${id}`).length, 1, `${id} renders once`);
+	}
+	// A status refresh replaces only the cards, so Skill Suggestions must sit outside their container.
+	assert.equal(doc.querySelector('#insights-container #section-skill-suggestions'), null);
+});
+
+/** `buildStats()` with cost-tier request counts and models in `last30Days`. */
+function buildStatsWithCostTiers(): Record<string, unknown> {
+	const stats = buildStats();
+	const period = stats.last30Days as { modelSwitching: Record<string, unknown> };
+	period.modelSwitching = {
+		...period.modelSwitching,
+		lowCostModels: ['low-model'], mediumCostModels: ['medium-model'], highCostModels: ['high-model'], unknownModels: ['unknown-model'],
+		lowCostRequests: 11, mediumCostRequests: 22, highCostRequests: 33, unknownRequests: 44, totalRequests: 110, mixedCostSessions: 7,
+	};
+	return stats;
+}
+
+test('cost-tier request counts and mixed-cost sessions render only in Model Cost Usage, with one icon per tier', async () => {
+	const harness = await bootWebview(buildStatsWithCostTiers());
+	const doc = harness.window.document;
+	const modelCost = doc.getElementById('section-model-cost');
+	const multiModel = doc.getElementById('section-multi-model');
+
+	for (const count of ['11', '22', '33', '44']) {
+		assert.ok(modelCost.textContent.includes(count), `Model Cost Usage shows ${count}`);
+	}
+	assert.match(modelCost.textContent, /7 mixed-cost sessions/);
+	assert.doesNotMatch(multiModel.textContent, /Request Count|Mixed cost sessions/);
+
+	assert.ok(multiModel.textContent.includes('medium-model'), 'Multi-Model Usage still names the models per tier');
+	for (const tier of ['💚 Low cost', '🔵 Medium cost', '💸 High cost', '❓ Unknown']) {
+		assert.ok(modelCost.textContent.includes(tier), `Model Cost Usage: ${tier}`);
+		assert.ok(multiModel.textContent.includes(tier), `Multi-Model Usage: ${tier}`);
+	}
+	assert.ok(!doc.getElementById('tab-panel-activity').innerHTML.includes('🟡'));
+});
+
+const BILLING_API_BALANCE = { budgetUsd: 39, budgetAiCredits: 3900, remainingAiCredits: 2900, usedAiCredits: 1000, pctAvailable: 74.4 };
+
+test('Billing holds GitHub API data and the coverage analysis, and links to Details for per-provider costs', async () => {
+	const harness = await bootWebview({
+		...buildStats(),
+		copilotApiBalance: BILLING_API_BALANCE,
+		monthBillingGroupCosts: { 'GitHub Copilot': 6, 'Claude Code': 3 },
+	});
+	const doc = harness.window.document;
+	const section = doc.querySelector('#tab-panel-billing #section-billing-coverage');
+
+	assert.ok(section.textContent.includes('AI Billing Coverage'));
+	assert.equal(section.querySelector('table'), null, 'the per-provider table lives in Details only');
+	assert.ok(!section.textContent.includes('Claude Code'));
+	assert.ok(section.textContent.includes('$10.00 (1,000 credits)'), 'API total');
+	assert.ok(section.textContent.includes('$6.00 (600 credits)'), 'extension tracked');
+	assert.ok(section.textContent.includes('$4.00 (400 credits)'), 'gap');
+	assert.ok(section.textContent.includes('$3.00'), 'other providers total');
+
+	doc.getElementById('btn-billing-details').click();
+	assert.ok(harness.posted.some((m) => m.command === 'showDetails'), 'the link opens Details');
+});
+
+test('Billing still reports the gap when there is no local Copilot cost', async () => {
+	const harness = await bootWebview({ ...buildStats(), copilotApiBalance: BILLING_API_BALANCE, monthBillingGroupCosts: { 'Claude Code': 3 } });
+	const section = harness.window.document.getElementById('section-billing-coverage');
+	assert.ok(section.textContent.includes('Gap (untracked Copilot usage)'));
+	assert.ok(section.textContent.includes('$10.00 (1,000 credits)'));
+});
+
+test('Billing with only local provider costs shows the sign-in hint and keeps the working Details link', async () => {
+	const harness = await bootWebview({ ...buildStats(), monthBillingGroupCosts: { 'Claude Code': 3 } });
+	const doc = harness.window.document;
+	const section = doc.getElementById('section-billing-coverage');
+	assert.ok(section.textContent.includes('GitHub authentication required'));
+	doc.getElementById('btn-billing-details').click();
+	assert.ok(harness.posted.some((m) => m.command === 'showDetails'));
+});
+
+test('Multi-Model Usage renders in the Activity tab (Spend & models band), not in Tools & Integrations', async () => {
+	const harness = await bootWebview(buildStats());
+	const doc = harness.window.document;
+
+	const section = doc.getElementById('section-multi-model');
+	assert.ok(section, 'the Multi-Model Usage section must render');
+	assert.ok(section.closest('#tab-panel-activity'), 'it belongs to the Activity tab');
+	assert.equal(doc.querySelector('#tab-panel-tools #section-multi-model'), null, 'it must not render under Tools & Integrations');
+	assert.equal(doc.querySelectorAll('#section-multi-model').length, 1);
+
+	const html = doc.getElementById('tab-panel-activity').innerHTML;
+	assert.ok(html.indexOf('id="section-model-cost"') < html.indexOf('id="section-multi-model"'), 'sits after Model Cost');
+	assert.ok(html.indexOf('id="section-multi-model"') < html.indexOf('id="section-model-efficiency"'), 'sits before the Local Model Leaderboard');
+	assert.equal(doc.querySelectorAll('#section-multi-model .three-column > *').length, 3, 'one column per period');
+});
 
 test('announces readiness both at listener registration and after the layout renders', async () => {
 	const harness = await bootWebview(buildStats());
@@ -752,6 +886,86 @@ test('the size chip reuses the scanned worktree size instead of a second disk wa
 	assert.ok(harness.text('.worktree-cleanup-log')?.includes('Size: '), 'expected a size chip taken from the scan result');
 });
 
+test('recovered space counts the bulk-deleted and retried worktrees, and resets on a new run', async () => {
+	const harness = await bootWebview(buildStats());
+	const row = (path: string, bytes: number) => ({ command: 'worktreeFound', worktree: { path, repoLabel: 'repo', branch: 'b', lastCommit: '', lastCommitDate: null, pushed: 'yes', files: 1, folders: 1, bytes } });
+	const bulk = 'C:\\wt\\bulk';
+	const retried = 'C:\\wt\\retried';
+	harness.post(row(bulk, 2 * 1024 * 1024));
+	harness.post(row(retried, 1024 * 1024));
+	harness.post({ command: 'cleanupStarted', total: 2 });
+	// The host sends worktreeDeleted before the per-row result.
+	harness.post({ command: 'worktreeDeleted', path: bulk });
+	harness.post({ command: 'cleanupWorktreeResult', path: bulk, branch: 'b', repoLabel: 'repo', status: 'deleted', processed: 1, total: 2 });
+	harness.post({
+		command: 'cleanupWorktreeResult', path: retried, branch: 'b', repoLabel: 'repo', status: 'error',
+		reason: 'Could not delete worktree.', diagnostics: { modifiedFiles: 0, untrackedFiles: 0 }, processed: 2, total: 2,
+	});
+	harness.post({ command: 'cleanupComplete' });
+	assert.ok(harness.window.document.body.textContent?.includes('2.00 MB recovered'), 'the bulk deletion frees its scanned size');
+
+	harness.post({ command: 'worktreeDeleteStarted', path: retried });
+	harness.post({ command: 'worktreeDeleted', path: retried });
+	harness.post({ command: 'worktreeDeleteResult', path: retried, status: 'deleted' });
+	assert.ok(harness.window.document.body.textContent?.includes('3.00 MB recovered'), 'a later retry adds its size');
+
+	// A stray delete of a row this run did not delete (e.g. a late event from an earlier run) adds nothing.
+	const stray = 'C:\\wt\\stray';
+	harness.post(row(stray, 5 * 1024 * 1024));
+	harness.post({ command: 'cleanupStarted', total: 1 });
+	harness.post({ command: 'worktreeDeleted', path: stray });
+	harness.post({
+		command: 'cleanupWorktreeResult', path: stray, branch: 'b', repoLabel: 'repo', status: 'error',
+		reason: 'Could not delete worktree.', diagnostics: { modifiedFiles: 0, untrackedFiles: 0 }, processed: 1, total: 1,
+	});
+	harness.post({ command: 'cleanupComplete' });
+	assert.ok(harness.window.document.body.textContent?.includes('0 B recovered'), 'a failed row never counts as recovered');
+	harness.post({ command: 'cleanupStarted', total: 1 });
+	assert.ok(harness.window.document.body.textContent?.includes('0 B recovered'), 'a new run starts from zero');
+});
+
+test('Copy prompt copies a branch-specific prompt, shows feedback, and survives a rejected clipboard', async () => {
+	const harness = await bootWebview(buildStats());
+	const worktreePath = 'C:\\wt\\copy';
+	harness.post({ command: 'cleanupStarted', total: 1 });
+	harness.post({
+		command: 'cleanupWorktreeResult', path: worktreePath, branch: 'feat/my-branch', repoLabel: 'repo', status: 'error',
+		reason: 'Could not delete worktree.', diagnostics: { modifiedFiles: 1, untrackedFiles: 0 }, processed: 1, total: 1,
+	});
+	harness.post({ command: 'cleanupComplete' });
+	const button = () => harness.window.document.querySelector('.worktree-copy-prompt-btn') as HTMLButtonElement;
+	const initialLabel = button().textContent;
+	const copied: string[] = [];
+	let reject = false;
+	Object.defineProperty(harness.window.navigator, 'clipboard', {
+		configurable: true,
+		value: { writeText: (text: string) => { copied.push(text); return reject ? Promise.reject(new Error('denied')) : Promise.resolve(); } },
+	});
+
+	button().click();
+	await new Promise((resolve) => setTimeout(resolve, 0));
+	assert.equal(copied.length, 1);
+	assert.ok(copied[0].includes('feat/my-branch'), 'the prompt names the branch');
+	assert.ok(button().textContent?.includes('Copied'), 'the button confirms the copy');
+
+	// A second click while "Copied!" is showing must not capture that text as the label to restore.
+	button().click();
+	await new Promise((resolve) => setTimeout(resolve, 0));
+	assert.equal(copied.length, 2);
+
+	// A rejected clipboard write is swallowed (no unhandled rejection) and gives no false confirmation.
+	harness.post({ command: 'cleanupStarted', total: 1 });
+	harness.post({
+		command: 'cleanupWorktreeResult', path: worktreePath, branch: 'feat/my-branch', repoLabel: 'repo', status: 'error',
+		reason: 'Could not delete worktree.', diagnostics: { modifiedFiles: 1, untrackedFiles: 0 }, processed: 1, total: 1,
+	});
+	harness.post({ command: 'cleanupComplete' });
+	reject = true;
+	button().click();
+	await new Promise((resolve) => setTimeout(resolve, 0));
+	assert.equal(button().textContent, initialLabel, 'a rejected write leaves the label unchanged');
+});
+
 test('a late delete result with no retry in flight is ignored, and empty worktrees still show a size', async () => {
 	const harness = await bootWebview(buildStats());
 	const worktreePath = 'C:\\wt\\empty';
@@ -802,10 +1016,10 @@ test('accepts payloads relayed the way VS Code actually delivers them', async ()
 	assert.ok(rendered?.includes('ai-engineering-fluency'), `expected the repo table, got: ${rendered}`);
 });
 
-test('marks HydraFusion sessions in the recent sessions list', async () => {
+test('marks Copilot Fusion sessions in the recent sessions list', async () => {
 	const stats = buildStats();
 	const hydraFusionSession = {
-		title: 'HydraFusion task',
+		title: 'Copilot Fusion task',
 		filePath: 'session.jsonl',
 		interactions: 12500,
 		toolCalls: 1500,
@@ -831,10 +1045,10 @@ test('marks HydraFusion sessions in the recent sessions list', async () => {
 	const harness = await bootWebview(stats);
 
 	const badges = harness.window.document.querySelectorAll('.hydrafusion-session-badge');
-	assert.equal(badges.length, 4, 'every HydraFusion id variant should be marked, and only those');
+	assert.equal(badges.length, 4, 'every Copilot Fusion id variant should be marked, and only those');
 	const badge = badges[0];
-	assert.ok(badge, 'expects a marker for HydraFusion sessions');
-	assert.equal(badge.textContent, 'HydraFusion');
+	assert.ok(badge, 'expects a marker for Copilot Fusion sessions');
+	assert.equal(badge.textContent, 'Copilot Fusion');
 	const row = harness.window.document.querySelector('.sessions-table tbody tr');
 	assert.match(row.textContent, /12\.5K/);
 	assert.match(row.textContent, /1\.5M/);
@@ -842,6 +1056,20 @@ test('marks HydraFusion sessions in the recent sessions list', async () => {
 	const costCell = [...row.cells].find(cell => cell.textContent === '$12.35');
 	// The table has no per-cell attributes, so the tooltip sits on the cell's content.
 	assert.equal(costCell?.querySelector('[title]')?.title, '$12.3450');
+
+	stats.localization = {
+		'usage.sessions.fusion.label': 'Fusion <标签>',
+		'usage.sessions.fusion.filterTooltip': '仅显示 "Fusion" 会话',
+		'usage.sessions.fusion.badgeTooltip': '此会话使用了 "Fusion"',
+	};
+	const localized = await bootWebview(stats);
+	const localizedBadge = localized.window.document.querySelector('.hydrafusion-session-badge');
+	const localizedPill = localized.window.document.querySelector('[data-filter-type="hydrafusion"]');
+	assert.equal(localizedBadge.textContent, 'Fusion <标签>');
+	assert.equal(localizedBadge.getAttribute('title'), '此会话使用了 "Fusion"');
+	assert.ok(localizedPill.textContent.includes('Fusion <标签>'));
+	assert.equal(localizedPill.getAttribute('title'), '仅显示 "Fusion" 会话');
+	assert.equal(localizedBadge.children.length, 0, 'localized text must not become markup');
 });
 
 test('Recent Sessions Duration column falls back to wall-clock time when activeDurationMs is zero', async () => {
@@ -867,7 +1095,7 @@ test('Recent Sessions Duration column falls back to wall-clock time when activeD
 	assert.doesNotMatch(row.textContent, /<1m/, 'a zero-but-defined activeDurationMs must not be shown as "<1m"');
 });
 
-test('Recent Sessions pill filters narrow the table by editor, vendor, model, and HydraFusion', async () => {
+test('Recent Sessions pill filters narrow the table by editor, vendor, model, and Copilot Fusion', async () => {
 	const stats = buildStats();
 	const baseSession = {
 		interactions: 10, toolCalls: 5, inputTokens: 1000, outputTokens: 500, thinkingTokens: 0,
@@ -876,34 +1104,34 @@ test('Recent Sessions pill filters narrow the table by editor, vendor, model, an
 	stats.todaySessions = [
 		{ ...baseSession, title: 'CLI session', filePath: 'a.jsonl', editor: 'Copilot CLI (App)', models: ['claude-opus-5'] },
 		{ ...baseSession, title: 'VS Code session', filePath: 'b.jsonl', editor: 'VS Code', models: ['gpt-5.6-terra'] },
-		{ ...baseSession, title: 'HydraFusion session', filePath: 'c.jsonl', editor: 'VS Code', models: ['hydrafusion'] },
+		{ ...baseSession, title: 'Copilot Fusion session', filePath: 'c.jsonl', editor: 'VS Code', models: ['hydrafusion'] },
 	];
 	const harness = await bootWebview(stats);
 	const doc = harness.window.document;
-	const titles = () => [...doc.querySelectorAll('.sessions-table tbody tr .session-title-link')].map(a => a.textContent.replace(/^HydraFusion/, ''));
+	const titles = () => [...doc.querySelectorAll('.sessions-table tbody tr .session-title-link')].map(a => a.textContent.replace(/^Copilot Fusion/, ''));
 
-	assert.deepEqual(titles(), ['CLI session', 'VS Code session', 'HydraFusion session'], 'all three sessions render before any filter is applied');
+	assert.deepEqual(titles(), ['CLI session', 'VS Code session', 'Copilot Fusion session'], 'all three sessions render before any filter is applied');
 
 	// Filter by editor: only the two VS Code sessions should remain.
 	const editorPill = [...doc.querySelectorAll('.session-filter-pill[data-filter-type="editor"]')].find(p => p.getAttribute('data-filter-value') === 'VS Code');
 	assert.ok(editorPill, 'expects a VS Code editor filter pill');
 	editorPill.click();
-	assert.deepEqual(titles(), ['VS Code session', 'HydraFusion session']);
+	assert.deepEqual(titles(), ['VS Code session', 'Copilot Fusion session']);
 	// The click replaces the whole table container's HTML, so re-query for the live pill.
 	const editorPillAfterClick = [...doc.querySelectorAll('.session-filter-pill[data-filter-type="editor"]')].find(p => p.getAttribute('data-filter-value') === 'VS Code');
 	assert.equal(editorPillAfterClick?.getAttribute('aria-pressed'), 'true', 'an active pill should expose aria-pressed="true"');
 
-	// Combine with the HydraFusion quick filter: only the HydraFusion session should remain.
+	// Combine with the Copilot Fusion quick filter: only the Copilot Fusion session should remain.
 	const hydraPill = doc.querySelector('.session-filter-pill-hydrafusion');
-	assert.ok(hydraPill, 'expects a HydraFusion quick-filter pill');
+	assert.ok(hydraPill, 'expects a Copilot Fusion quick-filter pill');
 	hydraPill.click();
-	assert.deepEqual(titles(), ['HydraFusion session']);
+	assert.deepEqual(titles(), ['Copilot Fusion session']);
 
 	// Clearing filters restores every session.
 	const clearButton = doc.getElementById('sessions-filter-clear');
 	assert.ok(clearButton, 'expects a "Clear filters" button once a filter is active');
 	clearButton.click();
-	assert.deepEqual(titles(), ['CLI session', 'VS Code session', 'HydraFusion session']);
+	assert.deepEqual(titles(), ['CLI session', 'VS Code session', 'Copilot Fusion session']);
 	assert.equal(doc.getElementById('sessions-filter-clear'), null, 'the clear button disappears once no filters are active');
 });
 
@@ -1143,7 +1371,7 @@ test('worktree repositories expand into a per-worktree table that moves with its
 	harness.post(worktree('C:\\wt\\a1', 'alpha', 10));
 	harness.post(worktree('C:\\wt\\b1', 'beta', 20));
 	harness.post(worktree('C:\\wt\\b2', 'beta', 30));
-	await new Promise((resolve) => setTimeout(resolve, 50));
+	await waitFor(() => doc.querySelectorAll('#data-table-root-worktree-repos tr.worktree-repo-row').length >= 2);
 	const repoOrder = () => [...doc.querySelectorAll('#data-table-root-worktree-repos tr.worktree-repo-row')].map((row: any) => row.getAttribute('data-repo'));
 
 	assert.deepEqual(repoOrder(), ['beta', 'alpha'], 'most worktrees first by default');
@@ -1277,6 +1505,28 @@ test('a deep link to Insights marks its new insights as seen', async () => {
 		.filter((m: any) => m.command === 'insightAction' && m.action === 'seen')
 		.map((m: any) => m.id);
 	assert.deepEqual(seen, ['insight-a'], 'only the new insight is marked seen, and it is marked');
+});
+
+test('an insights-only update keeps the localized Insights tab label and refreshes its badge', async () => {
+	// Regression: the badge refresh rewrote the whole button with a literal English "Insights".
+	const stats = buildStats() as any;
+	stats.localization = { 'usage.tab.insights': '洞察' };
+	stats.insights = [{ id: 'insight-a', status: 'new', title: 'A', body: 'a', severity: 'tip' }];
+	const harness = await bootWebview(stats);
+	await harness.settle();
+	const label = () => harness.window.document.querySelector('.tab-button[data-tab="insights"]')?.textContent?.trim();
+	assert.equal(label(), '洞察 1', 'initial render is localized');
+
+	harness.post({
+		command: 'updateInsights',
+		insights: [
+			{ id: 'insight-a', status: 'new', title: 'A', body: 'a', severity: 'tip' },
+			{ id: 'insight-b', status: 'new', title: 'B', body: 'b', severity: 'tip' },
+		],
+	});
+	await harness.settle();
+
+	assert.equal(label(), '洞察 2', 'the refresh updates the badge and keeps the translation');
 });
 
 test('group tabs expose which one is selected to assistive technology', async () => {
@@ -1524,6 +1774,116 @@ test('corrections filter reports how many moments are shown and can be cleared',
 	assert.equal(harness.window.document.querySelectorAll('button.correction-moment').length, 2);
 });
 
+test('Previous Month columns show the previous full month, not the current month to date', async () => {
+	const stats = buildStats();
+	const period = (requests: number, effort: string): Record<string, unknown> => {
+		const base = emptyPeriod();
+		return {
+			...base,
+			modelSwitching: {
+				...(base.modelSwitching as Record<string, unknown>),
+				totalRequests: requests, lowCostRequests: requests, totalSessions: 1, averageModelsPerSession: 1,
+				// Multi-Model Usage shows no request counts, so this is its per-period figure.
+				maxModelsPerSession: requests,
+				lowCostModels: [`model-${effort}`],
+			},
+			thinkingEffortUsage: { byEffort: { [effort]: requests }, sessionCount: 1, switchCount: 0, byModel: {} },
+		};
+	};
+	stats.month = period(111, 'minimal');
+	stats.lastMonth = period(222, 'xhigh');
+	const harness = await bootWebview(stats);
+	const document = harness.window.document;
+
+	const previousMonthColumn = (sectionId: string): string => {
+		const heading = Array.from<any>(document.querySelectorAll(`#${sectionId} h4`))
+			.find((h4) => /Previous Month/.test(h4.textContent));
+		assert.ok(heading, `${sectionId} must have a Previous Month column`);
+		return heading.parentElement.textContent;
+	};
+	for (const sectionId of ['section-model-cost', 'section-multi-model', 'section-thinking-effort']) {
+		const column = previousMonthColumn(sectionId);
+		assert.match(column, /222/, `${sectionId} shows lastMonth`);
+		assert.doesNotMatch(column, /111/, `${sectionId} must not show month-to-date`);
+	}
+	assert.match(document.getElementById('section-multi-model').textContent, /model-xhigh/, 'the cost levels list the models used last month');
+});
+
+test('every insight deep-link anchor resolves to its section inside the destination tab', async () => {
+	const stats = buildStats();
+	stats.repeatedTasks = {
+		minClusterSize: 2,
+		sessionsScanned: 20,
+		clusters: [{
+			representativePrompt: 'run the tests and fix the failures',
+			sessionCount: 3,
+			repositories: ['o/r1'],
+			sessions: [],
+			sharedKeywords: ['run', 'tests'],
+		}],
+	};
+	stats.curationAnalysis = {
+		windowDays: 30,
+		availableTools: [{ name: 'old-skill', source: 'skill' }],
+		unusedTools: [],
+		underusedMcpServers: [],
+		estimatedPromptBloat: { totalTokens: 0, byServer: {} },
+		recommendations: [],
+	};
+	const harness = await bootWebview(stats);
+	const targets = [
+		{ tab: 'insights', anchor: 'section-skill-suggestions', title: /Skill Suggestions/ },
+		{ tab: 'health', anchor: 'section-tool-curation', title: /Tool Curation/i },
+		{ tab: 'activity', anchor: 'section-interaction-modes', title: /Interaction Modes/i },
+		{ tab: 'activity', anchor: 'section-model-efficiency', title: /Model/i },
+	];
+	for (const { tab, anchor, title } of targets) {
+		harness.scrolledTo.length = 0;
+		harness.post({ command: 'switchTab', tab, anchor });
+		await harness.settleScroll();
+		assert.deepEqual(harness.scrolledTo, [anchor], `${anchor} must be the scroll target`);
+		const section = harness.window.document.getElementById(anchor);
+		assert.ok(section.closest(`#tab-panel-${tab}`), `${anchor} must live in the ${tab} tab`);
+		assert.match(section.textContent, title);
+	}
+});
+
+test('repeated corrections re-renders keep one panel, one listener and a working filter toggle', async () => {
+	const harness = await bootWebview(buildStatsWithCorrections());
+	const document = harness.window.document;
+	document.querySelector('.tab-button[data-tab="corrections"]')?.click();
+	const panel = document.getElementById('tab-panel-corrections');
+	const pill = (): any => document.querySelector('button[data-correction-filter="tool-error"]');
+	const assertSinglePanel = (): void => {
+		assert.equal(document.querySelectorAll('[id="tab-panel-corrections"]').length, 1, 'the panel id must stay unique');
+		assert.equal(document.getElementById('tab-panel-corrections'), panel, 'the panel element must survive a re-render');
+	};
+
+	// Every toggle must land exactly once; a stacked listener would flip the filter back on itself.
+	pill().click();
+	assertSinglePanel();
+	assert.equal(pill().getAttribute('aria-pressed'), 'true');
+	assert.equal(document.querySelectorAll('button.correction-moment').length, 1);
+	pill().click();
+	assertSinglePanel();
+	assert.equal(pill().getAttribute('aria-pressed'), 'false');
+	assert.equal(document.querySelectorAll('button.correction-moment').length, 2);
+	pill().click();
+	assertSinglePanel();
+	assert.equal(pill().getAttribute('aria-pressed'), 'true');
+
+	// One listener posts one message, however many re-renders came before it.
+	const before = harness.posted.length;
+	document.querySelector('button.correction-moment')?.click();
+	assert.equal(harness.posted.slice(before).filter((message) => message.command === 'openSessionFile').length, 1);
+
+	// Leaving and returning must not strand the content inside a hidden nested panel.
+	document.querySelector('.tab-button[data-tab="tools"]')?.click();
+	document.querySelector('.tab-button[data-tab="corrections"]')?.click();
+	assert.equal(panel.style.display, 'block');
+	assert.ok(panel.querySelector('button.correction-moment'), 'the tab must not come back blank');
+});
+
 test('the escalating pill is a filter that narrows the list to escalated moments', async () => {
 	const harness = await bootWebview(buildStatsWithEscalatingCorrection());
 	harness.window.document.querySelector('.tab-button[data-tab="corrections"]')?.click();
@@ -1640,7 +2000,7 @@ test("the highlight flash restores a new card's own glow instead of stripping it
 
 	harness.post({ command: 'switchTab', tab: 'insights', anchor: 'insight-card-marathon-session-today' });
 	await harness.settleScroll();
-	await new Promise((resolve) => setTimeout(resolve, 2100));
+	await waitFor(() => harness.window.document.getElementById('insight-card-marathon-session-today').style.boxShadow === before);
 
 	assert.equal(
 		harness.window.document.getElementById('insight-card-marathon-session-today').style.boxShadow,
@@ -1659,7 +2019,7 @@ test('flashing the same card twice in a row does not leave it permanently outlin
 	await harness.settleScroll();
 	harness.post({ command: 'switchTab', tab: 'insights', anchor: 'insight-card-marathon-session-today' });
 	await harness.settleScroll();
-	await new Promise((resolve) => setTimeout(resolve, 2100));
+	await waitFor(() => harness.window.document.getElementById('insight-card-marathon-session-today').style.boxShadow === before);
 
 	assert.equal(
 		harness.window.document.getElementById('insight-card-marathon-session-today').style.boxShadow,
@@ -1926,8 +2286,34 @@ test('flashing a second card while the first is still lit restores both', async 
 	await harness.settleScroll();
 	harness.post({ command: 'switchTab', tab: 'insights', anchor: second });
 	await harness.settleScroll();
-	await new Promise((resolve) => setTimeout(resolve, 2200));
+	await waitFor(() => {
+		const doc = harness.window.document;
+		return doc.getElementById(first).style.boxShadow === before.first && doc.getElementById(second).style.boxShadow === before.second;
+	});
 
 	assert.equal(harness.window.document.getElementById(first).style.boxShadow, before.first);
 	assert.equal(harness.window.document.getElementById(second).style.boxShadow, before.second);
+});
+
+test('missedPotential keeps only well-formed workspace rows when sanitizing the payload', async () => {
+	const stats = buildStats();
+	stats.missedPotential = [
+		{ workspacePath: '/repos/keep-me', workspaceName: 'keep-me', sessionCount: 3, interactionCount: 30, nonCopilotFiles: [] },
+		null,
+		'not-an-object',
+		{ workspaceName: 'no-path', sessionCount: 1, interactionCount: 1, nonCopilotFiles: [] },
+	];
+	const harness = await bootWebview(stats);
+	const section = harness.window.document.getElementById('section-missed-potential');
+
+	assert.ok(section, 'the Missed Potential section must render');
+	assert.ok(section.textContent.includes('keep-me'), 'the well-formed workspace is listed');
+	assert.ok(!section.textContent.includes('no-path'), 'a row without a workspacePath is dropped');
+	assert.equal(section.querySelectorAll('tbody tr').length, 1, 'only the valid row survives');
+});
+
+test('a payload with no curationAnalysis still renders instead of throwing in the sanitizer', async () => {
+	const harness = await bootWebview(buildStats());
+
+	assert.ok(harness.window.document.getElementById('section-missed-potential'), 'the layout renders without curation data');
 });

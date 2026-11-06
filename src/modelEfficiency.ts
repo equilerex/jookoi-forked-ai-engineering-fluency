@@ -22,10 +22,11 @@
  * This module is intentionally pure (no VS Code API, no filesystem access) so it
  * can be unit-tested with mocked data and reused by the CLI and the webview.
  */
-import type { DailyModelEfficiency, DailyModelEfficiencyEntry, DailyTokenStats, ModelEfficiencyCounters, ModelEfficiencyUsage, ModelPricing, ModelUsage, SessionFileCache } from './types';
+import type { DailyModelEfficiency, DailyModelEfficiencyEntry, DailyTokenStats, ModelEfficiencyCounters, ModelEfficiencyUsage, ModelPricing, ModelSessionRecord, ModelUsage, SessionFileCache, SessionUsageAnalysis } from './types';
+import { activeSessionDays, addModelUsage, scaleModelUsage } from './statsHelpers';
 import { calculateEstimatedCost } from './tokenEstimation';
-import { addModelUsage } from './statsHelpers';
 import { isUnsafeObjectKey } from './utils/protoGuard';
+import { createLatencyHistogram, latencyPercentileMs, mergeLatencyHistogram, recordLatencyMs } from './latencyHistogram';
 
 // ---------------------------------------------------------------------------
 // Edit-tool detection
@@ -114,8 +115,77 @@ export interface EfficiencyTurn {
 	userMessage?: string;
 	/** Raw assistant response text (correction detection only). */
 	assistantResponse?: string;
-	/** Turn timestamp (correction detection only). */
+	/** Turn timestamp: correction detection, and the start of the turn-latency window. */
 	timestamp?: string | null;
+	/** ISO time of the turn's last assistant/tool event; with `timestamp` it bounds the turn-latency window. */
+	endTimestamp?: string | null;
+	/** Reported (not estimated) token usage; only `completionTokens` is read, for output tokens/second. */
+	actualUsage?: { completionTokens?: number };
+}
+
+/**
+ * Wall-clock span of a turn in ms, or null when either end is missing, unparsable
+ * or inverted. Sources without per-turn end times (Mistral Vibe) therefore yield
+ * no latency rather than a made-up one.
+ */
+export function turnDurationMs(turn: Pick<EfficiencyTurn, 'timestamp' | 'endTimestamp'>): number | null {
+	if (!turn.timestamp || !turn.endTimestamp) { return null; }
+	const start = Date.parse(turn.timestamp);
+	const end = Date.parse(turn.endTimestamp);
+	if (!Number.isFinite(start) || !Number.isFinite(end) || end < start) { return null; }
+	return end - start;
+}
+
+/**
+ * Sum of the merged turn windows in ms (idle gaps between turns excluded), or 0
+ * when no turn has a usable window. Gives sources without Copilot Chat's
+ * `timings.totalElapsed` an `activeDurationMs` from the same windows the latency
+ * histogram uses.
+ */
+export function activeDurationFromTurns(turns: Pick<EfficiencyTurn, 'timestamp' | 'endTimestamp'>[]): number {
+	const windows: { start: number; end: number }[] = [];
+	for (const turn of turns) {
+		const duration = turnDurationMs(turn);
+		if (duration !== null) {
+			const start = Date.parse(turn.timestamp!);
+			windows.push({ start, end: start + duration });
+		}
+	}
+	if (windows.length === 0) { return 0; }
+	windows.sort((a, b) => a.start - b.start);
+	let total = 0;
+	let curStart = windows[0].start;
+	let curEnd = windows[0].end;
+	for (const { start, end } of windows.slice(1)) {
+		if (start <= curEnd) { curEnd = Math.max(curEnd, end); }
+		else { total += curEnd - curStart; curStart = start; curEnd = end; }
+	}
+	return total + (curEnd - curStart);
+}
+
+/** Folds `src`'s turn-latency fields into `target`; a source without any leaves `target` untouched. */
+export function mergeTurnLatency(
+	target: Pick<ModelEfficiencyCounters, 'turnLatency' | 'timedOutputTokens' | 'timedOutputMs'>,
+	src: Pick<ModelEfficiencyCounters, 'turnLatency' | 'timedOutputTokens' | 'timedOutputMs'>,
+): void {
+	if (src.turnLatency && src.turnLatency.count > 0) {
+		mergeLatencyHistogram(target.turnLatency ??= createLatencyHistogram(), src.turnLatency);
+	}
+	if (src.timedOutputMs && src.timedOutputMs > 0) {
+		target.timedOutputTokens = (target.timedOutputTokens ?? 0) + (src.timedOutputTokens ?? 0);
+		target.timedOutputMs = (target.timedOutputMs ?? 0) + src.timedOutputMs;
+	}
+}
+
+function recordTurnLatency(counters: ModelEfficiencyCounters, turn: EfficiencyTurn): void {
+	const duration = turnDurationMs(turn);
+	if (duration === null) { return; }
+	recordLatencyMs(counters.turnLatency ??= createLatencyHistogram(), duration);
+	const outputTokens = turn.actualUsage?.completionTokens ?? 0;
+	if (outputTokens > 0 && duration > 0) {
+		counters.timedOutputTokens = (counters.timedOutputTokens ?? 0) + outputTokens;
+		counters.timedOutputMs = (counters.timedOutputMs ?? 0) + duration;
+	}
 }
 
 export function createEmptyModelEfficiencyCounters(): ModelEfficiencyCounters {
@@ -179,6 +249,7 @@ export function computeEfficiencyFromTurns(turns: EfficiencyTurn[]): ModelEffici
 		const counters = ensureCounters(eff, model);
 		counters.calls++;
 		analyzeTurnToolCalls(turn.toolCalls ?? [], counters);
+		recordTurnLatency(counters, turn);
 	}
 	return eff;
 }
@@ -238,7 +309,16 @@ export function mergeModelEfficiency(target: ModelEfficiencyUsage, source: Model
 		t.outputTokens += counters.outputTokens;
 		t.cachedReadTokens += counters.cachedReadTokens;
 		t.cost += counters.cost;
+		addExactCost(t, counters.exactCost, counters.exactCostSessions);
+		mergeTurnLatency(t, counters);
 	}
+}
+
+/** Adds exact-billing figures to a counter set, leaving the fields absent when there is nothing to add. */
+function addExactCost(target: ModelEfficiencyCounters, exactCost: number | undefined, exactCostSessions: number | undefined): void {
+	if (exactCost === undefined && exactCostSessions === undefined) { return; }
+	target.exactCost = (target.exactCost ?? 0) + (exactCost ?? 0);
+	target.exactCostSessions = (target.exactCostSessions ?? 0) + (exactCostSessions ?? 0);
 }
 
 /**
@@ -284,7 +364,8 @@ export function createEmptyDailyModelEfficiencyEntry(): DailyModelEfficiencyEntr
  */
 function ensureDailyEntry(target: DailyModelEfficiency, model: string): DailyModelEfficiencyEntry | null {
 	if (isUnsafeObjectKey(model)) { return null; }
-	if (!target[model]) { target[model] = createEmptyDailyModelEfficiencyEntry(); }
+	// Own-property check: a model id such as "toString" must not resolve to an inherited member.
+	if (!Object.hasOwn(target, model) || !target[model]) { target[model] = createEmptyDailyModelEfficiencyEntry(); }
 	return target[model];
 }
 
@@ -303,6 +384,8 @@ export interface SessionEfficiencyAttribution {
 	linesRemoved?: number;
 	applies?: number;
 	codeBlocks?: number;
+	/** Exact Copilot billing for the whole session in USD; split across models by token share. */
+	exactCostDollars?: number;
 }
 
 /**
@@ -429,10 +512,13 @@ export function accumulateDailyModelTokens(
 	modelUsage: ModelUsage | undefined,
 	modelPricing: { [key: string]: ModelPricing } = {},
 	modelEfficiency?: ModelEfficiencyUsage,
+	exactCostDollars?: number,
 ): void {
 	if (!modelUsage) { return; }
 	const router = findRoutedSessionModel(modelUsage, modelEfficiency);
 	const counted = new Set<string>();
+	const totalTokens = Object.values(modelUsage).reduce((sum, u) => sum + (u.inputTokens || 0) + (u.outputTokens || 0), 0);
+	const modelCount = Object.keys(modelUsage).length;
 	for (const [model, usage] of Object.entries(modelUsage)) {
 		const key = efficiencyModelKey(model, router, modelEfficiency);
 		const entry = ensureDailyEntry(target, key);
@@ -441,8 +527,18 @@ export function accumulateDailyModelTokens(
 		entry.outputTokens += usage.outputTokens || 0;
 		entry.cachedReadTokens += usage.cachedReadTokens || 0;
 		entry.cost += calculateEstimatedCost({ [model]: usage }, modelPricing);
+		if (exactCostDollars !== undefined) {
+			// Exact billing is per session, not per model: split it by token share, which is
+			// also how the router row collects the shares of the real models behind it.
+			const share = totalTokens > 0 ? ((usage.inputTokens || 0) + (usage.outputTokens || 0)) / totalTokens : 1 / modelCount;
+			addExactCost(entry, exactCostDollars * share, 0);
+		}
 		// One session, however many real models the router spread it over.
-		if (!counted.has(key)) { entry.sessions += 1; counted.add(key); }
+		if (!counted.has(key)) {
+			entry.sessions += 1;
+			if (exactCostDollars !== undefined) { entry.exactCostSessions = (entry.exactCostSessions ?? 0) + 1; }
+			counted.add(key);
+		}
 	}
 }
 
@@ -455,20 +551,18 @@ export function accumulateDailyModelTokens(
  * session* (on the day of its last activity), because the underlying counters
  * describe the whole session and cannot be attributed to individual days.
  */
-export function accumulateDailyModelCounters(target: DailyModelEfficiency, input: SessionEfficiencyAttribution): void {
+export function accumulateDailyModelCounters(
+	target: DailyModelEfficiency,
+	input: SessionEfficiencyAttribution,
+	pricing: { [model: string]: ModelPricing } = {},
+): void {
 	const shares = computeModelTokenShares(input);
 	if (shares.size === 0) { return; }
 
 	for (const [model, counters] of Object.entries(input.modelEfficiency ?? {})) {
 		const entry = ensureDailyEntry(target, model);
 		if (!entry) { continue; }
-		entry.calls += counters.calls;
-		entry.toolCalls = (entry.toolCalls ?? 0) + (counters.toolCalls ?? 0);
-		entry.editTurns += counters.editTurns;
-		entry.oneShotEditTurns += counters.oneShotEditTurns;
-		entry.retries += counters.retries;
-		entry.selfCorrections += counters.selfCorrections;
-		entry.editToolCalls += counters.editToolCalls;
+		addTurnCounters(entry, counters);
 	}
 
 	const hasDuration = (input.activeDurationMs ?? 0) > 0;
@@ -484,14 +578,77 @@ export function accumulateDailyModelCounters(target: DailyModelEfficiency, input
 		entry.linesRemoved += (input.linesRemoved ?? 0) * share;
 		entry.applies += (input.applies ?? 0) * share;
 		entry.codeBlocks += (input.codeBlocks ?? 0) * share;
+		pushSessionRecord(entry, buildModelSessionRecord(model, share, shares.size > 1, hasDuration, input, pricing));
 	}
+}
+
+/** Adds a session's exact per-model turn counters to a day entry. */
+function addTurnCounters(entry: DailyModelEfficiencyEntry, counters: ModelEfficiencyCounters): void {
+	entry.calls += counters.calls;
+	entry.toolCalls = (entry.toolCalls ?? 0) + (counters.toolCalls ?? 0);
+	entry.editTurns += counters.editTurns;
+	entry.oneShotEditTurns += counters.oneShotEditTurns;
+	entry.retries += counters.retries;
+	entry.selfCorrections += counters.selfCorrections;
+	entry.editToolCalls += counters.editToolCalls;
+	mergeTurnLatency(entry, counters);
+}
+
+function pushSessionRecord(entry: DailyModelEfficiencyEntry, record: ModelSessionRecord): void {
+	(entry.sessionRecords ??= []).push(record);
+}
+
+/** The latency fields a session record copies from its model's counters (cloned, so records never alias them). */
+function sessionRecordLatency(c: ModelEfficiencyCounters): Pick<ModelSessionRecord, 'turnLatency' | 'timedOutputTokens' | 'timedOutputMs'> {
+	const out: Pick<ModelSessionRecord, 'turnLatency' | 'timedOutputTokens' | 'timedOutputMs'> = {};
+	if (c.turnLatency && c.turnLatency.count > 0) { out.turnLatency = { ...c.turnLatency, buckets: [...c.turnLatency.buckets] }; }
+	if (c.timedOutputMs) { out.timedOutputTokens = c.timedOutputTokens ?? 0; out.timedOutputMs = c.timedOutputMs; }
+	return out;
+}
+
+/** One session's whole-session footprint for `model`; see {@link ModelSessionRecord}. */
+function buildModelSessionRecord(
+	model: string,
+	share: number,
+	mixed: boolean,
+	hasDuration: boolean,
+	input: SessionEfficiencyAttribution,
+	pricing: { [model: string]: ModelPricing },
+): ModelSessionRecord {
+	const usage = input.modelUsage?.[model];
+	const c = input.modelEfficiency?.[model] ?? createEmptyModelEfficiencyCounters();
+	const scaled = (value: number | undefined): number => (value ?? 0) * share;
+	return {
+		mixed,
+		share,
+		inputTokens: usage?.inputTokens || 0,
+		outputTokens: usage?.outputTokens || 0,
+		cachedReadTokens: usage?.cachedReadTokens || 0,
+		cost: usage ? calculateEstimatedCost({ [model]: usage }, pricing) : 0,
+		...(input.exactCostDollars !== undefined ? { exactCost: scaled(input.exactCostDollars) } : {}),
+		calls: c.calls,
+		editTurns: c.editTurns,
+		oneShotEditTurns: c.oneShotEditTurns,
+		retries: c.retries,
+		selfCorrections: c.selfCorrections,
+		loc: scaled((input.linesAdded ?? 0) + (input.linesRemoved ?? 0)),
+		activeDurationMs: hasDuration ? scaled(input.activeDurationMs) : 0,
+		applies: scaled(input.applies),
+		codeBlocks: scaled(input.codeBlocks),
+		...sessionRecordLatency(c),
+	};
 }
 
 /**
  * Maps a parsed session cache entry onto the attribution input shape, preferring
  * the session's own LOC totals and falling back to its edit-scope analysis.
  */
-export function buildSessionEfficiencyAttribution(sessionData: SessionFileCache): SessionEfficiencyAttribution {
+/** The session fields {@link buildSessionEfficiencyAttribution} reads; a `SessionFileCache` satisfies it. */
+export type SessionEfficiencySource = Pick<SessionFileCache, 'modelUsage' | 'linesAdded' | 'linesRemoved' | 'copilotExactCostDollars'> & {
+	usageAnalysis?: Partial<Pick<SessionUsageAnalysis, 'modelEfficiency' | 'sessionDuration' | 'editScope' | 'applyUsage'>>;
+};
+
+export function buildSessionEfficiencyAttribution(sessionData: SessionEfficiencySource): SessionEfficiencyAttribution {
 	const analysis = sessionData.usageAnalysis;
 	return {
 		// Routed sessions are re-keyed so the router's token share lands on the
@@ -503,6 +660,7 @@ export function buildSessionEfficiencyAttribution(sessionData: SessionFileCache)
 		linesRemoved: sessionData.linesRemoved ?? analysis?.editScope?.linesRemoved,
 		applies: analysis?.applyUsage?.totalApplies,
 		codeBlocks: analysis?.applyUsage?.totalCodeBlocks,
+		exactCostDollars: sessionData.copilotExactCostDollars,
 	};
 }
 
@@ -522,6 +680,7 @@ export function buildSessionEfficiencyAttribution(sessionData: SessionFileCache)
 		t.outputTokens += s.outputTokens;
 		t.cachedReadTokens += s.cachedReadTokens;
 		t.cost += s.cost;
+		addExactCost(t, s.exactCost, s.exactCostSessions);
 		t.sessions += s.sessions;
 		t.sessionShare += s.sessionShare;
 		t.activeDurationMs += s.activeDurationMs;
@@ -530,6 +689,8 @@ export function buildSessionEfficiencyAttribution(sessionData: SessionFileCache)
 		t.linesRemoved += s.linesRemoved;
 		t.applies += s.applies;
 		t.codeBlocks += s.codeBlocks;
+		mergeTurnLatency(t, s);
+		if (s.sessionRecords?.length) { (t.sessionRecords ??= []).push(...s.sessionRecords); }
 	}
 }
 
@@ -555,9 +716,39 @@ export interface ModelEfficiencyRates {
 	toolCallsPerCall: number | null;
 	/** Cache-read share of input tokens (0..1). */
 	cacheHitRate: number | null;
+	/** Median end-to-end turn duration in seconds (histogram p50, accurate to a bucket); null when no turn was timed. */
+	medianTurnSeconds: number | null;
+	/** Output tokens per second over the timed turns that reported output tokens; null when none did. */
+	outputTokensPerSecond: number | null;
+	/**
+	 * Input tokens per turn that were not served from the prompt cache
+	 * (`inputTokens − cachedReadTokens`, clamped at 0). When the source never
+	 * reports cache reads ({@link cacheReadsReported} false) this equals the raw
+	 * input and is an upper bound.
+	 */
+	freshInputTokensPerCall: number | null;
+	/** Input tokens per turn served from the prompt cache (clamped to the input total). */
+	cachedInputTokensPerCall: number | null;
+	/** True when any cache read was reported; false means the fresh figure cannot be trusted as fresh. */
+	cacheReadsReported: boolean;
+}
+
+/** Output tokens per second from a counter's timed-turn totals; null without a usable denominator. */
+export function outputTokensPerSecond(c: Pick<ModelEfficiencyCounters, 'timedOutputTokens' | 'timedOutputMs'>): number | null {
+	return c.timedOutputMs && c.timedOutputMs > 0 && (c.timedOutputTokens ?? 0) > 0
+		? c.timedOutputTokens! / (c.timedOutputMs / 1000)
+		: null;
+}
+
+/** Median turn duration in seconds from a counter's histogram; null when empty. */
+export function medianTurnSeconds(c: Pick<ModelEfficiencyCounters, 'turnLatency'>): number | null {
+	const ms = c.turnLatency ? latencyPercentileMs(c.turnLatency, 0.5) : null;
+	return ms === null ? null : ms / 1000;
 }
 
 export function deriveModelEfficiencyRates(c: ModelEfficiencyCounters): ModelEfficiencyRates {
+	// Clamp: some providers report cachedReadTokens > inputTokens (e.g. DeepSeek).
+	const cachedTokens = Math.min(c.cachedReadTokens, c.inputTokens);
 	return {
 		oneShotRate: c.editTurns > 0 ? c.oneShotEditTurns / c.editTurns : null,
 		retryRate: c.editTurns > 0 ? c.retries / c.editTurns : null,
@@ -568,6 +759,11 @@ export function deriveModelEfficiencyRates(c: ModelEfficiencyCounters): ModelEff
 		toolCallsPerCall: c.calls > 0 ? (c.toolCalls ?? 0) / c.calls : null,
 		// Cap at 1.0: some providers report cachedReadTokens > inputTokens (e.g. DeepSeek).
 		cacheHitRate: c.inputTokens > 0 ? Math.min(1, c.cachedReadTokens / c.inputTokens) : null,
+		medianTurnSeconds: medianTurnSeconds(c),
+		outputTokensPerSecond: outputTokensPerSecond(c),
+		freshInputTokensPerCall: c.calls > 0 ? (c.inputTokens - cachedTokens) / c.calls : null,
+		cachedInputTokensPerCall: c.calls > 0 ? cachedTokens / c.calls : null,
+		cacheReadsReported: c.cachedReadTokens > 0,
 	};
 }
 
@@ -634,7 +830,7 @@ export function computeLongTailModels(usage: ModelEfficiencyUsage): Set<string> 
 function getOrCreateEditorSlice(entry: DailyTokenStats, editor: string): DailyModelEfficiency {
 	if (!entry.modelEfficiency) { entry.modelEfficiency = {}; }
 	if (!entry.editorModelEfficiency) { entry.editorModelEfficiency = {}; }
-	if (!entry.editorModelEfficiency[editor]) { entry.editorModelEfficiency[editor] = {}; }
+	if (!Object.hasOwn(entry.editorModelEfficiency, editor) || !entry.editorModelEfficiency[editor]) { entry.editorModelEfficiency[editor] = {}; }
 	return entry.editorModelEfficiency[editor];
 }
 
@@ -650,10 +846,11 @@ export function accumulateDayAndEditorModelTokens(
 	modelUsage: ModelUsage,
 	pricing: { [model: string]: ModelPricing },
 	modelEfficiency?: ModelEfficiencyUsage,
+	exactCostDollars?: number,
 ): void {
 	const slice = getOrCreateEditorSlice(entry, editor);
-	accumulateDailyModelTokens(entry.modelEfficiency!, modelUsage, pricing, modelEfficiency);
-	accumulateDailyModelTokens(slice, modelUsage, pricing, modelEfficiency);
+	accumulateDailyModelTokens(entry.modelEfficiency!, modelUsage, pricing, modelEfficiency, exactCostDollars);
+	accumulateDailyModelTokens(slice, modelUsage, pricing, modelEfficiency, exactCostDollars);
 }
 
 /**
@@ -664,8 +861,36 @@ export function accumulateDayAndEditorModelCounters(
 	entry: DailyTokenStats,
 	editor: string,
 	input: SessionEfficiencyAttribution,
+	pricing: { [model: string]: ModelPricing } = {},
 ): void {
 	const slice = getOrCreateEditorSlice(entry, editor);
-	accumulateDailyModelCounters(entry.modelEfficiency!, input);
-	accumulateDailyModelCounters(slice, input);
+	accumulateDailyModelCounters(entry.modelEfficiency!, input, pricing);
+	accumulateDailyModelCounters(slice, input, pricing);
+}
+
+/**
+ * Folds one session's model-efficiency data into day-keyed stats, for hosts without a
+ * `SessionFileCache` (the CLI, and the desktop app through it). Mirrors the extension's
+ * daily walk: token/cost usage is split across the session's days by `dailyFractions`,
+ * and the session-level counters (turns, duration, LOC, applies) land on its last active
+ * day. Call it after `addSessionToDailyStats()` for the same session, which creates the
+ * day entries.
+ */
+export function addSessionEfficiencyToDailyStats(
+	dailyStatsMap: Map<string, DailyTokenStats>,
+	session: SessionEfficiencySource & { editorType: string; dailyFractions: Record<string, number> },
+	pricing: { [model: string]: ModelPricing },
+): void {
+	const modelEfficiency = session.usageAnalysis?.modelEfficiency;
+	if (!modelEfficiency && Object.keys(session.modelUsage).length === 0) { return; }
+	// Only this session's own active days: one created by another session must not receive
+	// this session's counters (see activeSessionDays).
+	const activeDays = activeSessionDays(session.dailyFractions).filter(([k]) => dailyStatsMap.has(k));
+	for (const [dayKey, fraction] of activeDays) {
+		accumulateDayAndEditorModelTokens(dailyStatsMap.get(dayKey)!, session.editorType, scaleModelUsage(session.modelUsage, fraction), pricing, modelEfficiency, session.copilotExactCostDollars === undefined ? undefined : session.copilotExactCostDollars * fraction);
+	}
+	const lastDay = activeDays.at(-1)?.[0];
+	if (lastDay) {
+		accumulateDayAndEditorModelCounters(dailyStatsMap.get(lastDay)!, session.editorType, buildSessionEfficiencyAttribution(session), pricing);
+	}
 }

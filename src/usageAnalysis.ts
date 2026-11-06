@@ -2,6 +2,7 @@
  * Usage analysis functions for session data processing.
  * Analysis and aggregation functions extracted from CopilotTokenTracker.
  */
+import { analyzeHydraFusionSession, toHydraFusionRollup, addHydraFusionRollup, createEmptyHydraFusionRollup } from './hydrafusion';
 import * as fs from 'fs';
 import * as path from 'path';
 import type {
@@ -13,7 +14,6 @@ import type {
 	EditScopeUsage,
 	ApplyButtonUsage,
 	SessionDurationData,
-	ConversationPatterns,
 	AgentTypeUsage,
 	ModelSwitchingAnalysis,
 	ModelUsage,
@@ -22,8 +22,11 @@ import type {
 	TokenEstimator,
 	LanguageUsage,
 	LatencyHistogram,
+	VendorSessionStats,
+	VendorToolOutcomes,
 } from './types';
 import { mergeAutonomyUsage, recordAutonomy } from './autonomy';
+import { advanceCliAgentState, createCliAgentState, mergeAgentUsage, readVsCodeModeId, recordVsCodeRequestAgents, type CliAgentState } from './agentUsage';
 import {
 	classifySessionTurns,
 	createEmptyTaskClassificationResult,
@@ -31,6 +34,7 @@ import {
 	TASK_CATEGORIES,
 } from './taskClassification';
 import {
+	activeDurationFromTurns,
 	computeEfficiencyFromTurns,
 	jsonRequestToToolCalls,
 	mergeModelEfficiency,
@@ -112,6 +116,8 @@ value?: { fsPath?: string; path?: string; external?: string };
 /** A request entry in a session file */
 interface SessionRequestRaw {
 requestId?: string;
+/** VS Code per-request mode: carries the selected custom agent's name and file URI. */
+modeInfo?: unknown;
 timestamp?: number;
 timeSpentWaiting?: number;
 agent?: { id?: string };
@@ -449,6 +455,14 @@ interface ResponseItemRaw {
 
 export interface UsageAnalysisDeps {
 	warn: (msg: string) => void;
+	/**
+	 * Called when {@link analyzeSessionUsage} could not analyze the session at all (the read,
+	 * parse or adapter call threw) and is returning an empty analysis in its place. Distinct
+	 * from `warn`, which also carries non-fatal notices (a sub-step that failed, an unexpected
+	 * format) whose analysis is still valid. Lets a caller avoid caching an empty result from a
+	 * transient failure.
+	 */
+	onAnalysisError?: (error: unknown) => void;
 	ecosystems: IEcosystemAdapter[];
 	tokenEstimators: Record<string, TokenEstimator>;
 	modelPricing: { [key: string]: ModelPricing };
@@ -687,24 +701,6 @@ function _eemCountSingleEdit(editObj: SingleEditObj, ext: string, languageUsage:
 		linesRemoved += removed;
 		if (!languageUsage[ext]) { languageUsage[ext] = { linesAdded: 0, linesRemoved: 0 }; }
 		languageUsage[ext].linesRemoved += removed;
-	}
-	return { linesAdded, linesRemoved };
-}
-
-/** Process all edit groups for a textEditGroup response item, returning line delta totals. */
-function _eemProcessEdits(respRaw: unknown, ext: string, languageUsage: LanguageUsage): { linesAdded: number; linesRemoved: number } {
-	const respRawAny = respRaw as { edits?: unknown };
-	let linesAdded = 0;
-	let linesRemoved = 0;
-	if (!Array.isArray(respRawAny.edits)) { return { linesAdded, linesRemoved }; }
-	for (const editGroup of respRawAny.edits as unknown[]) {
-		if (!Array.isArray(editGroup)) { continue; }
-		for (const edit of editGroup as unknown[]) {
-			if (!edit || typeof edit !== 'object') { continue; }
-			const delta = _eemCountSingleEdit(edit as SingleEditObj, ext, languageUsage);
-			linesAdded += delta.linesAdded;
-			linesRemoved += delta.linesRemoved;
-		}
 	}
 	return { linesAdded, linesRemoved };
 }
@@ -950,12 +946,39 @@ function _applyJsonRequestsEfficiency(
 			userMessage: typeof req.message?.text === 'string' ? req.message.text : undefined,
 			assistantResponse: _jsonRequestAssistantText(req),
 			timestamp: typeof req.timestamp === 'number' ? new Date(req.timestamp).toISOString() : null,
+			...(_jsonRequestEndTimestamp(req) ? { endTimestamp: _jsonRequestEndTimestamp(req) } : {}),
+			...(_jsonRequestCompletionTokens(req) > 0 ? { actualUsage: { completionTokens: _jsonRequestCompletionTokens(req) } } : {}),
 		});
 	}
 	if (turns.length === 0) { return; }
 	analysis.modelEfficiency = computeEfficiencyFromTurns(turns);
 	_setFirstUserPrompt(analysis, turns.find(t => t.userMessage)?.userMessage);
 	_setCorrectionDetection(analysis, turns);
+}
+
+/** `timestamp + timings.totalElapsed` — the same window `_accumulateRequestTiming` uses for active time. */
+function _jsonRequestEndTimestamp(req: SessionRequestRaw): string | null {
+	const elapsed = req.result?.timings?.totalElapsed;
+	if (typeof req.timestamp !== 'number' || typeof elapsed !== 'number' || elapsed < 0) { return null; }
+	return new Date(req.timestamp + elapsed).toISOString();
+}
+
+/** Reported output tokens of a request (old, new or insiders result layout); 0 when not reported. */
+function _jsonRequestCompletionTokens(req: SessionRequestRaw): number {
+	const result = req.result;
+	const candidates = [result?.usage?.completionTokens, result?.outputTokens, result?.metadata?.outputTokens];
+	return candidates.find((n): n is number => typeof n === 'number' && n > 0) ?? 0;
+}
+
+/**
+ * Give a session without Copilot Chat's `timings.totalElapsed` an active duration
+ * from the same turn windows its latency histogram uses. Never overrides a value
+ * a source already measured.
+ */
+function _applyTurnActiveDuration(analysis: SessionUsageAnalysis, turns: EfficiencyTurn[]): void {
+	if (!analysis.sessionDuration || analysis.sessionDuration.activeDurationMs > 0) { return; }
+	const activeDurationMs = activeDurationFromTurns(turns);
+	if (activeDurationMs > 0) { analysis.sessionDuration.activeDurationMs = activeDurationMs; }
 }
 
 function _setCorrectionDetection(analysis: SessionUsageAnalysis, turns: EfficiencyTurn[]): void {
@@ -1049,6 +1072,7 @@ function processJsonSessionRequests(
 	analysis: SessionUsageAnalysis
 ): void {
 	if (!sessionContent.requests || !Array.isArray(sessionContent.requests)) { return; }
+	recordVsCodeRequestAgents(analysis, sessionContent.requests as SessionRequestRaw[], sessionContent.requests.map(() => sessionContent.mode?.id));
 	const taskTurns: TaskTurnSignal[] = [];
 	for (const requestRaw of sessionContent.requests) {
 		_pjsrProcessRequest(deps, requestRaw as SessionRequestRaw, sessionContent, analysis, taskTurns);
@@ -1085,16 +1109,6 @@ function _muaMergeContextRefFields(period: UsageAnalysisPeriod, analysis: Sessio
 	p.pullRequest += a.pullRequest || 0;
 	p.copilotInstructions += a.copilotInstructions || 0;
 	p.agentsMd += a.agentsMd || 0;
-}
-
-/** Merge byKind and byPath maps from analysis context references into period. */
-function _muaMergeContextRefMaps(period: UsageAnalysisPeriod, analysis: SessionUsageAnalysis): void {
-	for (const [kind, count] of Object.entries(analysis.contextReferences.byKind || {})) {
-		period.contextReferences.byKind[kind] = (period.contextReferences.byKind[kind] || 0) + count;
-	}
-	for (const [path, count] of Object.entries(analysis.contextReferences.byPath || {})) {
-		period.contextReferences.byPath[path] = (period.contextReferences.byPath[path] || 0) + count;
-	}
 }
 
 type SessionModelSwitching = SessionUsageAnalysis['modelSwitching'];
@@ -1187,16 +1201,6 @@ function _muaMergeEditScope(period: UsageAnalysisPeriod, analysis: SessionUsageA
 	period.editScope.avgFilesPerSession = editSessions > 0 ? period.editScope.totalEditedFiles / editSessions : 0;
 }
 
-/** Merge apply usage (code block application) metrics from analysis into period. */
-function _muaMergeApplyUsage(period: UsageAnalysisPeriod, analysis: SessionUsageAnalysis): void {
-	if (!analysis.applyUsage) { return; }
-	period.applyUsage.totalApplies += analysis.applyUsage.totalApplies;
-	period.applyUsage.totalCodeBlocks += analysis.applyUsage.totalCodeBlocks;
-	period.applyUsage.applyRate = period.applyUsage.totalCodeBlocks > 0
-		? (period.applyUsage.totalApplies / period.applyUsage.totalCodeBlocks) * 100
-		: 0;
-}
-
 /** Merge session duration metrics from analysis into period using weighted averaging. */
 function _muaMergeSessionDuration(period: UsageAnalysisPeriod, analysis: SessionUsageAnalysis): void {
 	if (!analysis.sessionDuration) { return; }
@@ -1211,21 +1215,6 @@ function _muaMergeSessionDuration(period: UsageAnalysisPeriod, analysis: Session
 	period.sessionDuration.avgTotalElapsedMs = (prevElapsed + analysis.sessionDuration.avgTotalElapsedMs) / sessionCount;
 	const prevWait = period.sessionDuration.avgWaitTimeMs * (sessionCount - 1);
 	period.sessionDuration.avgWaitTimeMs = (prevWait + analysis.sessionDuration.avgWaitTimeMs) / sessionCount;
-}
-
-/** Merge conversation pattern metrics from analysis into period. */
-function _muaMergeConversationPatterns(period: UsageAnalysisPeriod, analysis: SessionUsageAnalysis): void {
-	if (!analysis.conversationPatterns) { return; }
-	period.conversationPatterns.multiTurnSessions += analysis.conversationPatterns.multiTurnSessions;
-	period.conversationPatterns.singleTurnSessions += analysis.conversationPatterns.singleTurnSessions;
-	period.conversationPatterns.maxTurnsInSession = Math.max(
-		period.conversationPatterns.maxTurnsInSession,
-		analysis.conversationPatterns.maxTurnsInSession
-	);
-	const totalSessions = period.conversationPatterns.multiTurnSessions + period.conversationPatterns.singleTurnSessions;
-	if (totalSessions <= 0) { return; }
-	const prevTotalTurns = period.conversationPatterns.avgTurnsPerSession * (totalSessions - 1);
-	period.conversationPatterns.avgTurnsPerSession = (prevTotalTurns + analysis.conversationPatterns.avgTurnsPerSession) / totalSessions;
 }
 
 /** Merge thinking effort data from analysis into period. */
@@ -1377,6 +1366,7 @@ function _muaMergeModeUsage(period: UsageAnalysisPeriod, analysis: SessionUsageA
 	period.modeUsage.claudeDesktop = (period.modeUsage.claudeDesktop ?? 0) + (analysis.modeUsage.claudeDesktop ?? 0);
 	period.modeUsage.claudeVsCode = (period.modeUsage.claudeVsCode ?? 0) + (analysis.modeUsage.claudeVsCode ?? 0);
 	mergeAutonomyUsage(period, analysis.autonomyUsage);
+	mergeAgentUsage(period, analysis.agentUsage);
 }
 
 /**
@@ -1431,6 +1421,14 @@ export function mergeUsageAnalysis(period: UsageAnalysisPeriod, analysis: Sessio
 	_muaMergeTaskCategories(period, analysis);
 	_muaMergeCorrections(period, analysis);
 	_muaMergeCacheBreakage(period, analysis);
+	_muaMergeHydraFusion(period, analysis);
+	_muaMergeVendorStats(period, analysis);
+}
+
+/** Sum the session's Copilot Fusion routing rollup into the period (additive; absent for sessions that never routed). */
+function _muaMergeHydraFusion(period: UsageAnalysisPeriod, analysis: SessionUsageAnalysis): void {
+	if (!analysis.hydraFusion) { return; }
+	period.hydraFusion = addHydraFusionRollup(period.hydraFusion ?? createEmptyHydraFusionRollup(), analysis.hydraFusion);
 }
 
 /** Fold per-tool / per-MCP-server failure counts and latency histograms into the period (all optional, all additive). */
@@ -1475,6 +1473,29 @@ function _muaMergeHistograms(
 		mergeLatencyHistogram(target[key] ??= createLatencyHistogram(), histogram);
 	}
 	return target;
+}
+
+/** Fold a session's vendor-reported stats into the period (all fields optional and additive; absent stays absent). */
+function _muaMergeVendorStats(period: UsageAnalysisPeriod, analysis: SessionUsageAnalysis): void {
+	const from = analysis.vendorStats;
+	if (!from) { return; }
+	const into: VendorSessionStats = period.vendorStats ??= {};
+	for (const key of ['tokensPerSecond', 'lastTurnDurationMs'] as const) {
+		const add = from[key];
+		if (add) { into[key] = { samples: (into[key]?.samples ?? 0) + add.samples, sum: (into[key]?.sum ?? 0) + add.sum }; }
+	}
+	for (const key of ['reportedCostDollars', 'steps'] as const) {
+		const add = from[key];
+		if (add !== undefined) { into[key] = (into[key] ?? 0) + add; }
+	}
+	if (from.toolOutcomes) { _muaMergeToolOutcomeCounters(into.toolOutcomes ??= {}, from.toolOutcomes); }
+}
+
+function _muaMergeToolOutcomeCounters(out: VendorToolOutcomes, from: VendorToolOutcomes): void {
+	for (const key of ['succeeded', 'failed', 'rejected', 'agreed', 'hookDenied'] as const) {
+		const add = from[key];
+		if (add !== undefined) { out[key] = (out[key] ?? 0) + add; }
+	}
 }
 
 /** Fold a session's cache-breakage result into the period's aggregated stats. */
@@ -2250,6 +2271,8 @@ type AsuCliState = {
 	editedFilePaths: Set<string>;
 	/** Per-user-turn tool-call sequences for model efficiency metrics (issue #1649). */
 	efficiencyTurns: EfficiencyTurn[];
+	/** Which custom agent the user has selected (Copilot CLI `subagent.selected`). */
+	agent: CliAgentState;
 };
 
 /** Append a tool call to the current (or an implicit first) efficiency turn. */
@@ -2284,18 +2307,23 @@ function _asuReconstructAndProcessDeltaState(
 	// permissionLevel (autopilot vs default) can be toggled mid-session, so remember the value in
 	// force when each request first appeared rather than only the final one.
 	const levelByRequest: (string | undefined)[] = [];
+	// Same for the selected agent (`inputState.mode.id`), used when a request carries no `modeInfo`.
+	let modeId: string | undefined;
+	const modeIdByRequest: (string | undefined)[] = [];
 	for (const line of lines) {
 		try {
 			const delta = JSON.parse(line);
 			sessionState = applyDelta(sessionState, delta) as DeltaSessionState;
 			permissionLevel = _asuReadPermissionLevel(delta) ?? permissionLevel;
+			modeId = readVsCodeModeId(delta) ?? modeId;
 			const requestCount = Array.isArray(sessionState.requests) ? sessionState.requests.length : 0;
-			while (levelByRequest.length < requestCount) { levelByRequest.push(permissionLevel); }
+			while (levelByRequest.length < requestCount) { levelByRequest.push(permissionLevel); modeIdByRequest.push(modeId); }
 		} catch { /* skip invalid lines */ }
 	}
 	processDeltaSessionAnalysis(deps, sessionState, lines, analysis);
 	if (Array.isArray(sessionState.requests)) {
 		(sessionState.requests as SessionRequestRaw[]).forEach((req, i) => { if (req?.requestId) { recordAutonomy(analysis, levelByRequest[i]); } });
+		recordVsCodeRequestAgents(analysis, sessionState.requests as SessionRequestRaw[], modeIdByRequest);
 	}
 }
 
@@ -2472,6 +2500,8 @@ function _asuProcessCliEvents(event: any, cliState: AsuCliState, analysis: Sessi
 	if (event.type === 'session.start' && event.data) { _asuHandleSessionStartEvent(event.data as Record<string, unknown>, cliState); }
 	if (event.type === 'session.model_change' && typeof event.data?.newModel === 'string') { cliState.defaultModel = event.data.newModel; }
 	_asuAccumulateAssistantText(event, cliState);
+	_asuExtendTurnWindow(event, cliState);
+	advanceCliAgentState(cliState.agent, analysis, event);
 	if (event.type === 'user.message') {
 		cliState.requestCount++;
 		const effort = typeof event.data?.reasoningEffort === 'string' ? event.data.reasoningEffort : cliState.defaultEffort;
@@ -2482,6 +2512,17 @@ function _asuProcessCliEvents(event: any, cliState: AsuCliState, analysis: Sessi
 		recordAutonomy(analysis, event.data?.agentMode);
 		const skillName = extractInvokedSkillNameFromPlainText(event.data?.content);
 		if (skillName) { addSkillCall(analysis, skillName); }
+	}
+}
+
+/** The turn ends at its last assistant/tool event; later events (shutdown, model changes) are not response work. */
+function _asuExtendTurnWindow(event: { type?: unknown; timestamp?: unknown; data?: { outputTokens?: unknown } }, cliState: AsuCliState): void {
+	const turn = cliState.efficiencyTurns[cliState.efficiencyTurns.length - 1];
+	if (!turn?.timestamp || typeof event.timestamp !== 'string') { return; }
+	if (typeof event.type !== 'string' || !(event.type.startsWith('assistant.') || event.type.startsWith('tool.'))) { return; }
+	turn.endTimestamp = event.timestamp;
+	if (event.type === 'assistant.message' && typeof event.data?.outputTokens === 'number' && event.data.outputTokens > 0) {
+		turn.actualUsage = { completionTokens: (turn.actualUsage?.completionTokens ?? 0) + event.data.outputTokens };
 	}
 }
 
@@ -2754,7 +2795,7 @@ async function _asuProcessNonDeltaJsonl(
 	const modeState: AsuModeState = { sessionMode: 'ask' };
 	const cliState: AsuCliState = {
 		defaultModel: 'unknown', defaultEffort: null, requestCount: 0, effortByRequest: {},
-		pendingToolCalls: new Map(), editedFilePaths: new Set(), efficiencyTurns: [],
+		pendingToolCalls: new Map(), editedFilePaths: new Set(), efficiencyTurns: [], agent: createCliAgentState(),
 	};
 	const isJetBrains = isJetBrainsSessionPath(sessionFile);
 	const jetBrainsMode: JetBrainsMode | null = isJetBrains ? detectJetBrainsModeFromContent(fileContent) : null;
@@ -2781,6 +2822,7 @@ async function _asuProcessNonDeltaJsonl(
 	await calculateModelSwitching(deps, sessionFile, analysis, fileContent);
 	// Track LOC/edit metrics for CLI sessions (delta path already handles this above)
 	await trackEnhancedMetrics(deps, sessionFile, analysis, fileContent);
+	_applyTurnActiveDuration(analysis, cliState.efficiencyTurns);
 	deriveConversationPatterns(analysis);
 }
 
@@ -2798,6 +2840,12 @@ async function _asuProcessJsonlUsage(
 		return;
 	}
 	await _asuProcessNonDeltaJsonl(deps, sessionFile, lines, fileContent, analysis);
+}
+
+/** Records the session's numeric Copilot Fusion routing rollup (Copilot CLI sessions that routed through it). */
+function _asuAttachHydraFusion(fileContent: string, analysis: SessionUsageAnalysis): void {
+	const hydraFusion = analyzeHydraFusionSession(fileContent);
+	if (hydraFusion) { analysis.hydraFusion = toHydraFusionRollup(hydraFusion); }
 }
 
 async function _asuProcessJsonUsage(
@@ -2827,6 +2875,7 @@ async function _addTurnEfficiencyFromAdapter(eco: IEcosystemAdapter, sessionFile
 	if (!eco.buildTurns) { return; }
 	try {
 		const { turns } = await eco.buildTurns(sessionFile);
+		_applyTurnActiveDuration(analysis, turns);
 		if (!analysis.modelEfficiency) {
 			const eff = computeEfficiencyFromTurns(turns);
 			if (Object.keys(eff).length > 0) { analysis.modelEfficiency = eff; }
@@ -2887,11 +2936,13 @@ export async function analyzeSessionUsage(deps: UsageAnalysisDeps, sessionFile: 
 
 		if (isJsonl) {
 			await _asuProcessJsonlUsage(deps, sessionFile, fileContent, analysis);
+			_asuAttachHydraFusion(fileContent, analysis);
 		} else {
 			await _asuProcessJsonUsage(deps, sessionFile, fileContent, preloadedParsedJson, analysis);
 		}
 	} catch (error) {
 		deps.warn(`Error analyzing session usage from ${sessionFile}: ${error}`);
+		deps.onAnalysisError?.(error);
 	}
 	if (!analysis.taskClassification) { analysis.taskClassification = createEmptyTaskClassificationResult(); }
 

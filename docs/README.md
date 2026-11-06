@@ -42,6 +42,7 @@ Per-component guides and READMEs.
 | [visual-studio/](visual-studio/README.md) | Visual Studio extension guide |
 | [sharing-server/](sharing-server/README.md) | Sharing server setup, personal dashboard and Team Insights |
 | [Sharing server data separation contract](../sharing-server/AGENTS.md) | Authoritative server privacy, comparison semantics and coding/testing requirements |
+| [release-video/](../release-video/README.md) | Making the extension's narrated release-notes video locally (`npm run video -- build --since <last covered version>`); agents use the `release-video` skill |
 | [specs/backend.md](specs/backend.md) | Backend API specification |
 | [specs/nonCopilotFilesDetection.md](specs/nonCopilotFilesDetection.md) | Non-Copilot file detection spec |
 
@@ -61,7 +62,7 @@ Documentation and JSON schemas for Copilot session log file formats across diffe
 | [logFilesSchema/codex-cli-session-format.md](logFilesSchema/codex-cli-session-format.md) | OpenAI Codex CLI session files under `$CODEX_HOME` |
 | [logFilesSchema/devin-cli-session-format.md](logFilesSchema/devin-cli-session-format.md) | Devin CLI (ACP-based, separate from the desktop app) SQLite `sessions.db` |
 | [logFilesSchema/devin-windsurf-session-format.md](logFilesSchema/devin-windsurf-session-format.md) | Devin desktop app and Windsurf shared Cascade storage format |
-| [logFilesSchema/hydrafusion-routing-events.md](logFilesSchema/hydrafusion-routing-events.md) | HydraFusion routing events in Copilot CLI logs — which models ran behind one answer, and what each leg cost |
+| [logFilesSchema/hydrafusion-routing-events.md](logFilesSchema/hydrafusion-routing-events.md) | Copilot Fusion routing events in Copilot CLI logs — which models ran behind one answer, and what each leg cost |
 | [logFilesSchema/claude-code-session-schema.json](logFilesSchema/claude-code-session-schema.json) | Claude Code session file schema (JSON) |
 | [logFilesSchema/jetbrains-session-schema.json](logFilesSchema/jetbrains-session-schema.json) | JetBrains Copilot session file schema (JSON) |
 | [logFilesSchema/session-file-schema.json](logFilesSchema/session-file-schema.json) | Manual schema documentation (JSON) |
@@ -84,6 +85,7 @@ Detailed documentation for individual features.
 | [features/EXPORT_FEATURE_UI.md](features/EXPORT_FEATURE_UI.md) | Export feature UI layout and visual description |
 | [features/SOCIAL-MEDIA-SHARE.md](features/SOCIAL-MEDIA-SHARE.md) | Social media sharing (LinkedIn, Bluesky, Mastodon) |
 | [features/VISUAL-MOCKUP-SHARE-FEATURE.md](features/VISUAL-MOCKUP-SHARE-FEATURE.md) | Visual mockup of the social share UI |
+| [features/REPO-HEATMAP.md](features/REPO-HEATMAP.md) | Repository Heatmap: files the agent read, edited, created or deleted, by folder |
 | [features/FLUENCY-LEVEL-VIEWER.md](features/FLUENCY-LEVEL-VIEWER.md) | Debug-only Fluency Level Viewer tool |
 | [features/FLUENCY-LEVEL-VIEWER-TEST-PLAN.md](features/FLUENCY-LEVEL-VIEWER-TEST-PLAN.md) | Test plan for the Fluency Level Viewer |
 | [features/FLUENCY-LEVEL-VIEWER-UI-MOCKUP.md](features/FLUENCY-LEVEL-VIEWER-UI-MOCKUP.md) | UI mockup for the Fluency Level Viewer |
@@ -96,9 +98,12 @@ Detailed documentation for individual features.
 | [features/COPILOT-MEMORY-FILES-INSIGHT.md](features/COPILOT-MEMORY-FILES-INSIGHT.md) | Copilot memory-files hygiene: shared analysis module, insight card, CLI `memory-files` command, and a Tools-tab UI section |
 | [features/COPILOT-SERVER-MEMORIES.md](features/COPILOT-SERVER-MEMORIES.md) | Copilot's server-side per-repository memory store: undocumented API contract, and turning re-learned facts into `AGENTS.md` entries |
 | [features/CLOUD-AGENT-COST.md](features/CLOUD-AGENT-COST.md) | Cloud Agent tab — per-repository AI credits, and the hourly cached snapshot behind it |
+| [features/GITHUB-ACTIVITY-CACHE.md](features/GITHUB-ACTIVITY-CACHE.md) | The per-entity cache behind the Repository PRs and Cloud Agent tabs — scope, retention, TTL/manual refresh, partial results, migration |
 | [features/DARK-FACTORY-READINESS.md](features/DARK-FACTORY-READINESS.md) | Dark Factory Readiness — per-repository governance control scan on the Fluency Score view |
 | [features/WORKSPACE-GROUPING.md](features/WORKSPACE-GROUPING.md) | Workspace grouping — folding worktrees, clones and remote spellings of one repository into one workspace, shared by the extension and the CLI |
-| [features/TTFT-TRENDS.md](features/TTFT-TRENDS.md) | Research > TTFT diagnostics tab — time-to-first-token averages and per-model trendlines from VS Code Chat's debug log |
+| [features/TTFT-TRENDS.md](features/TTFT-TRENDS.md) | Efficiency > TTFT tab — time-to-first-token averages and per-model trendlines from VS Code Chat's debug log |
+| [features/BADGE-SETUP-PLAN.md](features/BADGE-SETUP-PLAN.md) | GitHub Universe 2026 badge: design decisions, payload format, controls and roadmap (Wi-Fi push, motion features) |
+| [features/BADGE-SETUP.md](features/BADGE-SETUP.md) | Badge setup view: install the badge app and sync the fluency payload over USB, theme colours, what is sent |
 | [features/WHATS-NEW.md](features/WHATS-NEW.md) | What's New view and the one-a-day new-feature notification — the release catalog, view-visit tracking, and the pacing rules |
 
 ## Architecture Decision Records (ADR)
