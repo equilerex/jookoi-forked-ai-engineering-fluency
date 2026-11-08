@@ -31,7 +31,7 @@ import { toLocalDayKey } from '../../src/utils/dayKeys';
 import { calculateMaturityScores, getFluencyLevelData } from '../../src/maturityScoring';
 import { mergeToolFamilies } from '../../src/toolFamilies';
 import { detectEditorSource } from '../../src/workspaceHelpers';
-import { getEditorIconByName } from '../../vscode-extension/src/editorIcons';
+import { getEditorIconByName } from '../../src/editorIcons';
 import { buildWebviewLocalization } from '../../vscode-extension/src/webviewLocalization';
 import { createTranslator, resolvedLocale } from '../../vscode-extension/src/l10nCore';
 import {
@@ -617,13 +617,13 @@ async function timed<T>(label: string, fn: () => Promise<T>): Promise<T> {
 /** Run the aggregate calculators one after another against warm caches and publish the result. */
 async function publishDatasets(files: string[], generation: number): Promise<void> {
     const stats = await timed('detailed', () => calculateDetailedStats(files));
-    const { labels, days, allDaysMap } = await timed('daily', () => calculateDailyStats(files));
+    const dailyStats = await timed('daily', () => calculateDailyStats(files));
     const usageStats = await timed('usage', () => calculateUsageAnalysisStatsFast(files));
     const diagData = await timed('diagnostics', () => buildDiagnosticsDataInternal(files));
 
     if (generation === dataGeneration) {
         cachedStats = stats;
-        cachedChartPayload = buildChartPayload(labels, days, allDaysMap);
+        cachedChartPayload = buildChartPayload(dailyStats);
         cachedUsageStats = usageStats;
         cachedDiagnosticsData = diagData;
         cachedDataDay = toLocalDayKey(stats.lastUpdated);
